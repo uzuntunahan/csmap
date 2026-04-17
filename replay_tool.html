@@ -1,0 +1,1627 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CS2 Demo Replay Tool</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0d0f14;
+      --panel: #13161f;
+      --panel2: #1a1e2b;
+      --border: #252836;
+      --accent: #f5a623;
+      --ct: #4a9eff;
+      --t:  #ff6b35;
+      --green: #4caf50;
+      --red: #f44336;
+      --text: #e0e6f0;
+      --text2: #7a8599;
+      --smoke-color: rgba(180,180,200,0.35);
+      --inf-color:   rgba(255,90,20,0.40);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── Header ── */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 10px 20px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .logo { font-size: 18px; font-weight: 700; color: var(--accent); letter-spacing: 1px; }
+    .meta-info { display: flex; gap: 24px; font-size: 12px; color: var(--text2); flex: 1; }
+    .meta-info span strong { color: var(--text); }
+    .load-btn {
+      padding: 7px 18px;
+      background: var(--accent);
+      color: #000;
+      border: none;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 13px;
+      cursor: pointer;
+      transition: opacity .2s;
+    }
+    .load-btn:hover { opacity: .85; }
+    #file-input { display: none; }
+
+    /* ── Main layout ── */
+    .main {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* ── Map canvas panel ── */
+    .canvas-wrap {
+      flex: 1;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #08090d;
+      overflow: hidden;
+    }
+    #mapCanvas {
+      image-rendering: pixelated;
+      max-width: 100%;
+      max-height: 100%;
+    }
+
+    /* ── Right sidebar ── */
+    .sidebar {
+      width: 300px;
+      background: var(--panel);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .sidebar-section {
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .sidebar-title {
+      padding: 8px 14px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      color: var(--text2);
+      background: var(--panel2);
+    }
+
+    /* Scoreboard */
+    .scoreboard {
+      overflow-y: auto;
+      flex: 1;
+    }
+    .team-header {
+      padding: 6px 14px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+    }
+    .team-header.ct { color: var(--ct); background: rgba(74,158,255,.07); }
+    .team-header.t  { color: var(--t);  background: rgba(255,107,53,.07); }
+    .player-row {
+      display: grid;
+      grid-template-columns: 1fr 40px 40px 50px 40px;
+      align-items: center;
+      padding: 5px 14px;
+      font-size: 11px;
+      border-bottom: 1px solid rgba(255,255,255,.03);
+      transition: background .15s;
+    }
+    .player-row:hover { background: rgba(255,255,255,.04); }
+    .player-row.dead { opacity: .35; }
+    .player-name {
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .player-hp { color: var(--green); font-family: 'JetBrains Mono', monospace; text-align: right; }
+    .player-hp.low { color: var(--red); }
+    .col-hdr {
+      display: grid;
+      grid-template-columns: 1fr 40px 40px 50px 40px;
+      padding: 4px 14px;
+      font-size: 9px;
+      color: var(--text2);
+      text-transform: uppercase;
+      letter-spacing: .5px;
+    }
+    .col-hdr span { text-align: right; }
+    .col-hdr span:first-child { text-align: left; }
+    .money { color: #68d391; font-family: 'JetBrains Mono', monospace; font-size: 10px; text-align: right; }
+    .weapon-tag {
+      font-size: 9px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: rgba(255,255,255,.08);
+      text-align: right;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .kd-stat { font-family: 'JetBrains Mono', monospace; text-align: right; font-size: 10px; }
+
+    /* Round overview */
+    .rounds-container {
+      padding: 10px 14px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .round-pip {
+      width: 22px;
+      height: 22px;
+      border-radius: 4px;
+      font-size: 9px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      border: 2px solid transparent;
+      transition: all .15s;
+    }
+    .round-pip.ct   { background: rgba(74,158,255,.2); color: var(--ct); border-color: rgba(74,158,255,.3); }
+    .round-pip.t    { background: rgba(255,107,53,.2);  color: var(--t);  border-color: rgba(255,107,53,.3); }
+    .round-pip.active { border-color: var(--accent) !important; transform: scale(1.15); }
+
+    /* Event log */
+    .event-log {
+      overflow-y: auto;
+      max-height: 160px;
+      padding: 4px 0;
+    }
+    .timeline-log {
+      overflow-y: auto;
+      max-height: 150px;
+      padding: 4px 0;
+    }
+    .timeline-item {
+      padding: 4px 14px;
+      font-size: 10px;
+      line-height: 1.35;
+      border-bottom: 1px solid rgba(255,255,255,.03);
+      color: var(--text2);
+    }
+    .timeline-item strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .evt {
+      padding: 4px 14px;
+      font-size: 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      border-bottom: 1px solid rgba(255,255,255,.02);
+    }
+    .evt-icon { font-size: 12px; }
+    .evt-text { flex: 1; line-height: 1.3; }
+    .evt-text .high { color: var(--accent); font-weight: 600; }
+    .kill-row {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 8px;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 1.25;
+    }
+    .kill-side-left { text-align: right; }
+    .kill-side-right { text-align: left; }
+    .kill-name-ct { color: var(--ct); }
+    .kill-name-t { color: var(--t); }
+    .kill-name-neutral { color: var(--text); }
+    .kill-weapon {
+      color: #0f1118;
+      background: #f7b23d;
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-size: 9px;
+      font-family: 'JetBrains Mono', monospace;
+      letter-spacing: .2px;
+      white-space: nowrap;
+    }
+    .kill-hs {
+      display: inline-block;
+      margin-left: 4px;
+      color: #ffd166;
+      font-size: 9px;
+      font-weight: 700;
+    }
+
+    /* Debug panel */
+    .debug-panel {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      background: rgba(0,0,0,0.85);
+      border: 1px solid #ff6b35;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      color: #fff;
+      z-index: 1000;
+      max-width: 250px;
+      line-height: 1.4;
+    }
+    .debug-panel div { margin: 2px 0; }
+    .debug-label { color: #ff6b35; font-weight: bold; }
+
+    .controls {
+      background: var(--panel);
+      border-top: 1px solid var(--border);
+      padding: 10px 20px;
+      flex-shrink: 0;
+    }
+    .controls-row1 {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 8px;
+    }
+    .round-nav { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .nav-btn {
+      width: 28px; height: 28px;
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      display: flex; align-items: center; justify-content: center;
+      transition: background .15s;
+    }
+    .nav-btn:hover { background: var(--border); }
+    .round-label { font-weight: 700; font-size: 13px; min-width: 80px; text-align: center; }
+
+    .play-btn {
+      width: 38px; height: 38px;
+      border-radius: 50%;
+      background: var(--accent);
+      border: none;
+      color: #000;
+      font-size: 16px;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: opacity .2s, transform .1s;
+      flex-shrink: 0;
+    }
+    .play-btn:hover { opacity: .85; }
+    .play-btn:active { transform: scale(.95); }
+
+    .speed-select {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .control-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text2);
+      user-select: none;
+    }
+    .control-toggle input {
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+
+    .tick-display {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--text2);
+      margin-left: auto;
+    }
+
+    .slider-row { display: flex; align-items: center; gap: 10px; }
+    .slider-label { font-size: 10px; color: var(--text2); min-width: 30px; }
+
+    input[type=range] {
+      flex: 1;
+      appearance: none;
+      -webkit-appearance: none;
+      height: 4px;
+      border-radius: 2px;
+      background: var(--border);
+      outline: none;
+      cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: var(--accent);
+      cursor: pointer;
+      box-shadow: 0 0 6px rgba(245,166,35,.5);
+    }
+    #tickSlider { accent-color: var(--accent); }
+
+    /* Legend */
+    .legend {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      padding: 0 0 2px 0;
+      font-size: 10px;
+      color: var(--text2);
+    }
+    .legend-item { display: flex; align-items: center; gap: 4px; }
+    .legend-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    /* Overlay loading */
+    #overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.85);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      gap: 20px;
+    }
+    #overlay h2 { font-size: 22px; color: var(--accent); }
+    #overlay p  { font-size: 14px; color: var(--text2); text-align: center; max-width: 400px; }
+    .spinner {
+      width: 40px; height: 40px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin .75s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #overlay.hidden { display: none; }
+  </style>
+</head>
+<body>
+
+<!-- Debug Panel -->
+<div class="debug-panel" id="debugPanel">
+  <div><span class="debug-label">▶ DEBUG</span></div>
+  <div>Playing: <span id="dbgPlaying">–</span></div>
+  <div>TickIdx / Max: <span id="dbgTickIdx">–</span></div>
+  <div>AccumTime: <span id="dbgAccum">–</span></div>
+  <div>Speed: <span id="dbgSpeed">–</span></div>
+  <div>TicksPerMs: <span id="dbgTicksPerMs">–</span></div>
+  <div>TicksToAdv: <span id="dbgTicksToAdv">–</span></div>
+  <div>AnimID: <span id="dbgAnimId">–</span></div>
+  <div>Frames: <span id="dbgFrames">0</span></div>
+</div>
+
+<!-- Loading Overlay -->
+<div id="overlay">
+  <h2>⚡ CS2 Replay Tool</h2>
+  <p>Lütfen notebook'ta üretilen <strong>demo_data.json</strong> dosyasını yükleyin.</p>
+  <button class="load-btn" onclick="document.getElementById('file-input').click()">📂 demo_data.json Yükle</button>
+  <p style="font-size:11px;margin-top:8px">veya dosyayı buraya sürükleyin</p>
+</div>
+<input type="file" id="file-input" accept=".json" />
+
+<!-- Header -->
+<div class="header">
+  <span class="logo">▶ CS2 REPLAY</span>
+  <div class="meta-info">
+    <span>🗺️ Harita: <strong id="hdr-map">–</strong></span>
+    <span>🖥️ Sunucu: <strong id="hdr-server">–</strong></span>
+    <span>🎮 Demo: <strong id="hdr-demo">–</strong></span>
+    <span>📊 Rounds: <strong id="hdr-rounds">–</strong></span>
+  </div>
+  <button class="load-btn" onclick="document.getElementById('file-input').click()">📂 Yeni Dosya</button>
+</div>
+
+<!-- Main -->
+<div class="main">
+
+  <!-- Canvas -->
+  <div class="canvas-wrap" id="canvas-wrap">
+    <canvas id="mapCanvas"></canvas>
+  </div>
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+
+    <!-- Rounds -->
+    <div class="sidebar-section">
+      <div class="sidebar-title">Roundlar</div>
+      <div class="rounds-container" id="roundsContainer"></div>
+    </div>
+
+    <!-- Timeline -->
+    <div class="sidebar-section" style="flex-shrink:0">
+      <div class="sidebar-title">Round Timeline</div>
+      <div class="timeline-log" id="timelineLog"></div>
+    </div>
+
+    <!-- Scoreboard -->
+    <div class="sidebar-section scoreboard">
+      <div class="sidebar-title">Scoreboard</div>
+      <div class="col-hdr">
+        <span>Oyuncu</span><span>HP</span><span>K</span><span>$</span><span>Silah</span>
+      </div>
+      <div id="scoreboardContent"></div>
+    </div>
+
+    <!-- Events -->
+    <div class="sidebar-section" style="flex-shrink:0">
+      <div class="sidebar-title">Son Olaylar</div>
+      <div class="event-log" id="eventLog"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Controls -->
+<div class="controls">
+  <div class="controls-row1">
+    <div class="round-nav">
+      <button class="nav-btn" id="prevRound">◀</button>
+      <span class="round-label" id="roundLabel">Round 1</span>
+      <button class="nav-btn" id="nextRound">▶</button>
+    </div>
+    <button class="play-btn" id="playBtn">▶</button>
+    <select class="speed-select" id="speedSelect">
+      <option value="1" selected>1×</option>
+      <option value="2">2×</option>
+      <option value="4">4×</option>
+      <option value="8">8×</option>
+      <option value="16">16×</option>
+    </select>
+    <label class="control-toggle"><input type="checkbox" id="trailToggle" checked /> Trail</label>
+    <label class="control-toggle"><input type="checkbox" id="mapToggle" checked /> Map</label>
+    <span class="tick-display" id="tickDisplay">Tick: 0</span>
+
+    <div class="legend">
+      <div class="legend-item"><div class="legend-dot" style="background:var(--ct)"></div>CT</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--t)"></div>T</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#ff4444"></div>Kill</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div>Bomba</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#ffe07a"></div>Bomba Rotası</div>
+      <div class="legend-item"><div class="legend-dot" style="background:rgba(180,180,200,.8)"></div>Smoke</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#ff6622"></div>Molotov</div>
+    </div>
+  </div>
+  <div class="slider-row">
+    <span class="slider-label" id="sliderMin">0</span>
+    <input type="range" id="tickSlider" min="0" max="100" value="0" />
+    <span class="slider-label" id="sliderMax">100</span>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════════
+//  STATE
+// ═══════════════════════════════════════════════════════════════════════════════
+let DATA        = null;
+let roundIdx    = 0;         // current round index
+let tickIdx     = 0;         // index within current round tick list
+let playing     = false;
+let animId      = null;
+let lastTs      = null;
+let ticksInRound= [];        // sorted unique ticks for current round
+let playerKills = {};        // {steamid: kills}
+let killFlashes = [];        // [{tick, attX, attY, vicX, vicY, weapon, ttl}]
+let lastEventKey = null;     // prevent duplicate events on repaint
+let mapImage = null;         // optional radar image
+let mapImageReady = false;
+let drawMapLayer = true;
+let drawPlayerTrails = true;
+let roundPlayerRows = {};    // {steamid: [tickRows...]}
+let roundPlayerIds = [];     // steamids in current round
+let roundKillsData = [];     // kills only for active round
+let roundSmokesData = [];    // smokes only for active round
+let roundInfernosData = [];  // infernos only for active round
+let roundBombData = [];      // bomb events only for active round
+let roundGrenadesByTick = {}; // {tick: [grenade rows]}
+let roundGrenadesByEntity = {}; // {entity_id: [grenade rows sorted by tick]}
+let roundGrenadeLandings = []; // grenade landings for active round
+let roundBombCarrierPath = []; // bomb carrier path for active round
+
+const canvas  = document.getElementById('mapCanvas');
+const ctx     = canvas.getContext('2d');
+
+// Map bounds (will be computed from ticks data)
+let MAP = { minX: 0, maxX: 1, minY: 0, maxY: 1, w: 800, h: 800 };
+const CANVAS_SIZE = 800;
+const MAP_ZOOM = 0.85; // >1 narrows world bounds slightly so map alignment is tighter
+let programmaticSliderUpdate = false;  // flag to skip event when we update slider ourselves
+let accumulatedTime = 0;  // accumulate time for smooth advancement
+let frameCounter = 0;  // debug frame count
+let debugSpeed = 0;  // debug: current speed
+let debugTicksPerMs = 0;  // debug: ticks per ms
+let debugTicksToAdv = 0;  // debug: ticks to advance
+let roundAvgTickStep = 1; // avg tick delta between sampled frames (used for speed normalization)
+let renderInterp = 0; // 0..1 interpolation progress to next sampled tick
+
+document.getElementById('trailToggle').addEventListener('change', e => {
+  drawPlayerTrails = e.target.checked;
+  renderFrame();
+});
+
+document.getElementById('mapToggle').addEventListener('change', e => {
+  drawMapLayer = e.target.checked;
+  renderFrame();
+});
+
+function loadMapImage(src) {
+  if (!src) {
+    mapImage = null;
+    mapImageReady = false;
+    return;
+  }
+
+  const candidates = Array.isArray(src) ? src : [src];
+
+  const tryLoad = (idx) => {
+    if (idx >= candidates.length) {
+      mapImage = null;
+      mapImageReady = false;
+      console.warn('Map image could not be loaded. Tried:', candidates);
+      renderFrame();
+      return;
+    }
+
+    const candidate = candidates[idx];
+    const img = new Image();
+    img.onload = () => {
+      mapImage = img;
+      mapImageReady = true;
+      console.log('Map image loaded:', candidate);
+      renderFrame();
+    };
+    img.onerror = () => {
+      tryLoad(idx + 1);
+    };
+    img.src = candidate;
+  };
+
+  tryLoad(0);
+}
+
+function getMapImageCandidates(meta = {}) {
+  const set = new Set();
+  const mapName = (meta.map_name || '').trim();
+  const imagePath = (meta.map_image || '').trim();
+
+  const isProbablyImagePath = (p) => {
+    if (!p) return false;
+    const lower = p.toLowerCase();
+    if (lower.endsWith('.html') || lower.includes('replay_tool.html')) return false;
+    return /\.(png|jpg|jpeg|webp|gif)(\?|#|$)/i.test(lower);
+  };
+
+  const addPathVariants = (p) => {
+    if (!isProbablyImagePath(p)) return;
+    const normalized = p.replace(/\\/g, '/');
+    set.add(normalized);
+    set.add(`./${normalized}`);
+    set.add(encodeURI(normalized));
+    set.add(`./${encodeURI(normalized)}`);
+  };
+
+  addPathVariants(imagePath);
+  if (mapName) {
+    addPathVariants(`maps/${mapName}.png`);
+    addPathVariants(`${mapName}.png`);
+  }
+
+  return [...set];
+}
+
+function computeBoundsFromTicks(ticks, pad = 0) {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+
+  for (const t of ticks || []) {
+    const x = t?.X;
+    const y = t?.Y;
+    if (typeof x !== 'number' || typeof y !== 'number') continue;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX) || !Number.isFinite(minY) || !Number.isFinite(maxY)) {
+    return null;
+  }
+
+  return {
+    minX: minX - pad,
+    maxX: maxX + pad,
+    minY: minY - pad,
+    maxY: maxY + pad,
+  };
+}
+
+function applyZoomToBounds(bounds, zoom = 1) {
+  if (!bounds || zoom <= 0 || zoom === 1) return bounds;
+  const cx = (bounds.minX + bounds.maxX) / 2;
+  const cy = (bounds.minY + bounds.maxY) / 2;
+  const halfW = (bounds.maxX - bounds.minX) / (2 * zoom);
+  const halfH = (bounds.maxY - bounds.minY) / (2 * zoom);
+  return {
+    minX: cx - halfW,
+    maxX: cx + halfW,
+    minY: cy - halfH,
+    maxY: cy + halfH,
+  };
+}
+
+function normalizeTeam(teamName) {
+  const s = String(teamName || '').toLowerCase();
+  if (s === 'ct' || s.includes('counter') || s.includes('ct')) return 'ct';
+  if (s === 't' || s.includes('terrorist')) return 't';
+  return null;
+}
+
+function latestRowAtOrBefore(rows, tick) {
+  if (!rows || rows.length === 0) return null;
+  let lo = 0;
+  let hi = rows.length - 1;
+  let ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (rows[mid].tick <= tick) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return ans >= 0 ? rows[ans] : null;
+}
+
+function firstRowAfter(rows, tick) {
+  if (!rows || rows.length === 0) return null;
+  let lo = 0;
+  let hi = rows.length - 1;
+  let ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (rows[mid].tick > tick) {
+      ans = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  return ans >= 0 ? rows[ans] : null;
+}
+
+function updateDebugPanel() {
+  frameCounter++;
+  document.getElementById('dbgPlaying').textContent = playing ? 'YES' : 'NO';
+  document.getElementById('dbgTickIdx').textContent = `${tickIdx} / ${ticksInRound.length}`;
+  document.getElementById('dbgAccum').textContent = accumulatedTime.toFixed(2);
+  document.getElementById('dbgSpeed').textContent = debugSpeed + 'x';
+  document.getElementById('dbgTicksPerMs').textContent = debugTicksPerMs.toFixed(4);
+  document.getElementById('dbgTicksToAdv').textContent = debugTicksToAdv;
+  document.getElementById('dbgAnimId').textContent = animId ? 'YES' : 'NO';
+  document.getElementById('dbgFrames').textContent = frameCounter;
+}
+
+function buildRoundTimeline(roundNumber) {
+  if (!DATA) return;
+
+  const lines = [];
+  const round = DATA.rounds.find(r => r.round_num === roundNumber);
+  if (!round) return;
+
+  lines.push(`<div class="timeline-item"><strong>Round ${round.round_num}</strong> | Winner: ${round.winner || '?'} | ${round.reason || ''}</div>`);
+
+  const kills = DATA.kills
+    .filter(k => k.round_num === roundNumber)
+    .sort((a, b) => a.tick - b.tick)
+    .slice(0, 8);
+
+  for (const k of kills) {
+    lines.push(`<div class="timeline-item">T${k.tick}: <strong>${k.attacker_name || '?'}</strong> -> ${k.victim_name || '?'} [${k.weapon || '?'}]</div>`);
+  }
+
+  const bombEvents = DATA.bomb
+    .filter(b => b.round_num === roundNumber)
+    .sort((a, b) => a.tick - b.tick);
+
+  for (const b of bombEvents) {
+    lines.push(`<div class="timeline-item">T${b.tick}: <strong>${b.event || 'bomb'}</strong> ${b.name || ''} ${b.bombsite || ''}</div>`);
+  }
+
+  if (lines.length === 1) {
+    lines.push('<div class="timeline-item">Bu round için event bulunamadı.</div>');
+  }
+
+  document.getElementById('timelineLog').innerHTML = lines.join('');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  FILE LOADING
+// ═══════════════════════════════════════════════════════════════════════════════
+document.getElementById('file-input').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => loadData(JSON.parse(ev.target.result));
+  reader.readAsText(file);
+});
+
+// Drag & drop
+document.body.addEventListener('dragover', e => { e.preventDefault(); });
+document.body.addEventListener('drop', e => {
+  e.preventDefault();
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => loadData(JSON.parse(ev.target.result));
+  reader.readAsText(file);
+});
+
+function loadData(data) {
+  DATA = data;
+  document.getElementById('overlay').classList.add('hidden');
+
+  // Header meta
+  document.getElementById('hdr-map').textContent    = data.meta.map_name || '?';
+  document.getElementById('hdr-server').textContent = data.meta.server_name || '?';
+  document.getElementById('hdr-demo').textContent   = data.meta.demo_file || '?';
+  document.getElementById('hdr-rounds').textContent = data.rounds.length;
+
+  // Compute map bounds from observed tick positions first (best alignment with rendered data).
+  const mb = data.meta?.map_bounds;
+  const observed = computeBoundsFromTicks(data.ticks, 20);
+  if (observed) {
+    const z = applyZoomToBounds(observed, MAP_ZOOM);
+    MAP.minX = z.minX;
+    MAP.maxX = z.maxX;
+    MAP.minY = z.minY;
+    MAP.maxY = z.maxY;
+  } else if (mb && mb.min_x != null && mb.max_x != null && mb.min_y != null && mb.max_y != null) {
+    const z = applyZoomToBounds({
+      minX: mb.min_x,
+      maxX: mb.max_x,
+      minY: mb.min_y,
+      maxY: mb.max_y,
+    }, MAP_ZOOM);
+    MAP.minX = z.minX;
+    MAP.maxX = z.maxX;
+    MAP.minY = z.minY;
+    MAP.maxY = z.maxY;
+  }
+
+  const mapCandidates = getMapImageCandidates(data.meta || {});
+  loadMapImage(mapCandidates.length ? mapCandidates : null);
+
+  // Compute kill totals per steamid
+  playerKills = {};
+  for (const k of data.kills) {
+    const sid = k.attacker_steamid ? String(k.attacker_steamid) : null;
+    if (sid) playerKills[sid] = (playerKills[sid] || 0) + 1;
+  }
+
+  // Resize canvas
+  canvas.width  = CANVAS_SIZE;
+  canvas.height = CANVAS_SIZE;
+
+  // Build round pips
+  buildRoundPips();
+
+  // Jump to round 0
+  goToRound(0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ROUND NAVIGATION
+// ═══════════════════════════════════════════════════════════════════════════════
+function buildRoundPips() {
+  const container = document.getElementById('roundsContainer');
+  container.innerHTML = '';
+  DATA.rounds.forEach((r, i) => {
+    const pip = document.createElement('div');
+    pip.className = `round-pip ${String(r.winner || '').toLowerCase() === 'ct' ? 'ct' : 't'}`;
+    pip.textContent = r.round_num;
+    pip.title = `Round ${r.round_num} | Kazanan: ${r.winner} | ${r.reason}`;
+    pip.addEventListener('click', () => goToRound(i));
+    pip.id = `pip-${i}`;
+    container.appendChild(pip);
+  });
+}
+
+function goToRound(idx) {
+  if (!DATA) return;
+  roundIdx = Math.max(0, Math.min(idx, DATA.rounds.length - 1));
+  tickIdx  = 0;
+
+  // Highlight pip
+  document.querySelectorAll('.round-pip').forEach(p => p.classList.remove('active'));
+  const pip = document.getElementById(`pip-${roundIdx}`);
+  if (pip) { pip.classList.add('active'); pip.scrollIntoView({block:'nearest'}); }
+
+  document.getElementById('roundLabel').textContent = `Round ${DATA.rounds[roundIdx].round_num}`;
+  buildRoundTimeline(DATA.rounds[roundIdx].round_num);
+
+  // Collect tick indices for this round
+  const rNum = DATA.rounds[roundIdx].round_num;
+  const roundStart = DATA.rounds[roundIdx].freeze_end;
+  const roundEnd   = DATA.rounds[roundIdx].end;
+
+  const inRound = DATA.ticks.filter(t =>
+    t.round_num === rNum && t.tick >= roundStart && t.tick <= roundEnd
+  );
+
+  // Get unique sorted ticks
+  const tickSet = [...new Set(inRound.map(t => t.tick))].sort((a,b) => a-b);
+  ticksInRound = tickSet;
+
+  // Estimate sampled tick spacing (e.g. ~4 when exported with tick_sample=4).
+  if (ticksInRound.length > 1) {
+    const totalDelta = ticksInRound[ticksInRound.length - 1] - ticksInRound[0];
+    roundAvgTickStep = Math.max(1, totalDelta / (ticksInRound.length - 1));
+  } else {
+    roundAvgTickStep = 1;
+  }
+
+  // Build per-player timeline for this round.
+  roundPlayerRows = {};
+  for (const t of inRound) {
+    const sid = String(t.steamid);
+    if (!roundPlayerRows[sid]) roundPlayerRows[sid] = [];
+    roundPlayerRows[sid].push(t);
+  }
+  for (const sid of Object.keys(roundPlayerRows)) {
+    roundPlayerRows[sid].sort((a, b) => a.tick - b.tick);
+  }
+  roundPlayerIds = Object.keys(roundPlayerRows);
+
+  // Round-scoped caches to avoid filtering giant arrays every frame.
+  roundKillsData = DATA.kills.filter(k => k.round_num === rNum);
+  roundSmokesData = DATA.smokes.filter(s => s.round_num === rNum);
+  roundInfernosData = DATA.infernos.filter(inf => inf.round_num === rNum);
+  roundBombData = DATA.bomb.filter(b => b.round_num === rNum);
+  roundGrenadeLandings = (DATA.grenade_landings || []).filter(g => g.round_num === rNum);
+  roundBombCarrierPath = (DATA.bomb_carrier_path || []).filter(p => p.round_num === rNum);
+
+  roundGrenadesByTick = {};
+  roundGrenadesByEntity = {};
+  const roundGrenades = DATA.grenades.filter(g => g.round_num === rNum);
+  for (const g of roundGrenades) {
+    const tk = g.tick;
+    if (!roundGrenadesByTick[tk]) roundGrenadesByTick[tk] = [];
+    roundGrenadesByTick[tk].push(g);
+
+    const eid = g.entity_id;
+    if (!roundGrenadesByEntity[eid]) roundGrenadesByEntity[eid] = [];
+    roundGrenadesByEntity[eid].push(g);
+  }
+  for (const eid of Object.keys(roundGrenadesByEntity)) {
+    roundGrenadesByEntity[eid].sort((a, b) => a.tick - b.tick);
+  }
+
+  // Slider
+  const slider = document.getElementById('tickSlider');
+  slider.min = 0;
+  slider.max = Math.max(0, ticksInRound.length - 1);
+  slider.value = 0;
+  document.getElementById('sliderMin').textContent = ticksInRound[0] || 0;
+  document.getElementById('sliderMax').textContent = ticksInRound[ticksInRound.length-1] || 0;
+
+  killFlashes = [];
+  lastEventKey = null;
+  renderFrame();
+}
+
+document.getElementById('prevRound').addEventListener('click', () => { stopPlay(); goToRound(roundIdx - 1); });
+document.getElementById('nextRound').addEventListener('click', () => { stopPlay(); goToRound(roundIdx + 1); });
+
+document.getElementById('tickSlider').addEventListener('input', e => {
+  if (programmaticSliderUpdate) return;  // Skip if we're updating it programmatically
+  tickIdx = parseInt(e.target.value);
+  renderFrame();
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  PLAY / PAUSE
+// ═══════════════════════════════════════════════════════════════════════════════
+document.getElementById('playBtn').addEventListener('click', () => {
+  if (playing) stopPlay(); else startPlay();
+});
+
+function startPlay() {
+  playing = true;
+  document.getElementById('playBtn').textContent = '⏸';
+  lastTs = null;
+  accumulatedTime = 0;  // reset accumulator
+  animId = requestAnimationFrame(animLoop);
+}
+function stopPlay() {
+  playing = false;
+  document.getElementById('playBtn').textContent = '▶';
+  if (animId) { cancelAnimationFrame(animId); animId = null; }
+}
+
+function animLoop(ts) {
+  if (!playing) return;  // stop if not playing
+  
+  if (!lastTs) {
+    lastTs = ts;
+    animId = requestAnimationFrame(animLoop);
+    return;
+  }
+
+  const elapsed = ts - lastTs;
+  lastTs = ts;
+
+  const speed = parseInt(document.getElementById('speedSelect').value) || 1;
+  const ticksPerMs = (speed * 64) / 1000;  // real CS ticks per ms
+  const indexPerMs = ticksPerMs / Math.max(1, roundAvgTickStep); // sampled index steps per ms
+  
+  // Debug: store these values
+  debugSpeed = speed;
+  debugTicksPerMs = indexPerMs;
+  
+  // Accumulate time
+  accumulatedTime += elapsed;
+  
+  // Calculate sampled-index advance based on real tick speed and sample step.
+  const exactAdvance = accumulatedTime * indexPerMs;
+  const ticksToAdvance = Math.floor(exactAdvance);
+  renderInterp = exactAdvance - ticksToAdvance;
+  debugTicksToAdv = ticksToAdvance;  // debug
+  
+  if (ticksToAdvance > 0) {
+    tickIdx += ticksToAdvance;
+    accumulatedTime -= ticksToAdvance / indexPerMs;  // consume accumulated time
+    
+    // Check if round is over
+    if (tickIdx >= ticksInRound.length) {
+      if (roundIdx + 1 < DATA.rounds.length) {
+        goToRound(roundIdx + 1);
+        accumulatedTime = 0;  // reset for next round
+      } else {
+        tickIdx = ticksInRound.length - 1;
+        stopPlay();
+        renderFrame();
+        updateDebugPanel();  // show final state
+        return;
+      }
+    }
+    
+    programmaticSliderUpdate = true;
+    document.getElementById('tickSlider').value = tickIdx;
+    programmaticSliderUpdate = false;
+  }
+
+  // Always render so interpolation can smooth motion between sampled ticks.
+  renderFrame();
+  
+  // Update debug display after all calculations
+  updateDebugPanel();
+  
+  // Continue loop
+  animId = requestAnimationFrame(animLoop);
+}
+// ═══════════════════════════════════════════════════════════════════════════════
+//  COORDINATE HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+function worldToCanvas(wx, wy) {
+  // CS2 Y-axis is flipped relative to screen
+  const cx = ((wx - MAP.minX) / (MAP.maxX - MAP.minX)) * CANVAS_SIZE;
+  const cy = CANVAS_SIZE - ((wy - MAP.minY) / (MAP.maxY - MAP.minY)) * CANVAS_SIZE;
+  return [cx, cy];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  RENDER
+// ═══════════════════════════════════════════════════════════════════════════════
+function renderFrame() {
+  if (!DATA || ticksInRound.length === 0) return;
+
+  const currentTick = ticksInRound[Math.min(tickIdx, ticksInRound.length - 1)];
+  const nextTick = ticksInRound[Math.min(tickIdx + 1, ticksInRound.length - 1)];
+  const interpTick = currentTick + (nextTick - currentTick) * renderInterp;
+  const rNum = DATA.rounds[roundIdx].round_num;
+  const roundStart = DATA.rounds[roundIdx].freeze_end;
+  const roundEnd   = DATA.rounds[roundIdx].end;
+
+  // Gather robust snapshot: latest known row for each player up to current tick.
+  const playerSnap = {};
+  const playerSnapNext = {};
+  for (const sid of roundPlayerIds) {
+    const row = latestRowAtOrBefore(roundPlayerRows[sid], currentTick);
+    if (row) playerSnap[sid] = row;
+    const rowNext = latestRowAtOrBefore(roundPlayerRows[sid], nextTick);
+    if (rowNext) playerSnapNext[sid] = rowNext;
+  }
+
+  // Current kills in this round up to tick
+  const roundKills = roundKillsData.filter(k => k.tick <= currentTick);
+
+  // Active smokes
+  const activeSmokes = roundSmokesData.filter(s =>
+    s.start_tick <= currentTick && (s.end_tick == null || s.end_tick >= currentTick)
+  );
+
+  // Active infernos
+  const activeInfernos = roundInfernosData.filter(inf =>
+    inf.start_tick <= currentTick && inf.end_tick >= currentTick
+  );
+
+  // Grenades in flight this tick (round-scoped cache)
+  const grenadesNow = roundGrenadesByTick[currentTick] || [];
+
+  // Grenade landing points in this round
+  const grenadeLandings = roundGrenadeLandings.filter(g => g.land_tick <= currentTick);
+
+  // Bomb carrier path up to current tick
+  const bombCarrierPath = roundBombCarrierPath.filter(p => p.tick <= currentTick);
+
+  // Bomb state
+  const bombEvents = roundBombData.filter(b => b.tick <= currentTick);
+  let bombState = null;
+  if (bombEvents.length) {
+    bombState = bombEvents[bombEvents.length - 1];
+  }
+
+  // ── Kill flashes: add new kills ──
+  const eventKey = `${rNum}:${currentTick}`;
+  const isNewTickForLog = eventKey !== lastEventKey;
+  if (isNewTickForLog) {
+    const newKills = DATA.kills.filter(k =>
+      k.round_num === rNum &&
+      k.tick === currentTick
+    );
+    for (const k of newKills) {
+      if (k.attacker_X != null && k.victim_X != null) {
+        killFlashes.push({
+          tick: k.tick,
+          attX: k.attacker_X, attY: k.attacker_Y,
+          vicX: k.victim_X,   vicY: k.victim_Y,
+          weapon: k.weapon || '?',
+          ttl: 90,
+        });
+      }
+      addKillEvent(k);
+    }
+
+    const bombNow = DATA.bomb.filter(b => b.round_num === rNum && b.tick === currentTick);
+    for (const b of bombNow) {
+      let icon = '💣';
+      if (b.event === 'plant') icon = '📍';
+      if (b.event === 'defuse') icon = '🛠';
+      if (b.event === 'explode') icon = '💥';
+      addEvent(icon, `<span class="high">${b.name || '?'}</span> ${b.event || 'bomb'}`, b.bombsite || '');
+    }
+
+    for (const g of grenadesNow) {
+      const gType = g.grenade_type || 'grenade';
+      addEvent('🧨', `<span class="high">${g.thrower_name || g.name || '?'}</span> ${gType}`, 'throw');
+    }
+
+    lastEventKey = eventKey;
+  }
+  // Decay flashes
+  killFlashes = killFlashes.filter(f => {
+    f.ttl -= 3;
+    return f.ttl > 0;
+  });
+
+  // ══════════ DRAW ════════════
+  ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+  // Background map/grid
+  drawGrid();
+
+  // Player trails (last ~2s), built from round-local per-player rows.
+  if (drawPlayerTrails) {
+    const trailStart = currentTick - 128;
+
+    for (const sid of roundPlayerIds) {
+      const rows = roundPlayerRows[sid] || [];
+      if (!rows.length) continue;
+
+      const pts = [];
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const row = rows[i];
+        if (row.tick > currentTick) continue;
+        if (row.tick < trailStart) break;
+        if (row.X == null || row.Y == null) continue;
+        pts.push(row);
+      }
+
+      if (pts.length < 2) continue;
+      pts.reverse();
+
+      const sideTrail = normalizeTeam(pts[0].team_name || pts[0].side);
+      const isCTTrail = sideTrail === 'ct';
+      const lineColor = isCTTrail ? 'rgba(74,158,255,0.35)' : 'rgba(255,107,53,0.35)';
+
+      ctx.beginPath();
+      const [tx0, ty0] = worldToCanvas(pts[0].X, pts[0].Y);
+      ctx.moveTo(tx0, ty0);
+      for (let i = 1; i < pts.length; i++) {
+        const [tx, ty] = worldToCanvas(pts[i].X, pts[i].Y);
+        ctx.lineTo(tx, ty);
+      }
+      ctx.strokeStyle = lineColor;
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+    }
+  }
+
+  // Smokes
+  for (const sm of activeSmokes) {
+    if (sm.X == null || sm.Y == null) continue;
+    const [sx, sy] = worldToCanvas(sm.X, sm.Y);
+    const r = 38;
+    const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, r);
+    grad.addColorStop(0,   'rgba(200,200,220,0.55)');
+    grad.addColorStop(0.6, 'rgba(180,180,200,0.40)');
+    grad.addColorStop(1,   'rgba(160,160,180,0.05)');
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, Math.PI*2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(200,200,220,0.25)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // Infernos (molotov)
+  for (const inf of activeInfernos) {
+    if (inf.X == null || inf.Y == null) continue;
+    const [ix, iy] = worldToCanvas(inf.X, inf.Y);
+    const r = 28;
+    // Animated flicker
+    const flicker = 0.3 + 0.1 * Math.sin(Date.now() / 80);
+    const grad = ctx.createRadialGradient(ix, iy, 0, ix, iy, r);
+    grad.addColorStop(0,   `rgba(255,200,50,${0.7 + flicker})`);
+    grad.addColorStop(0.4, `rgba(255,100,20,${0.55 + flicker})`);
+    grad.addColorStop(1,   'rgba(255,60,0,0.02)');
+    ctx.beginPath();
+    ctx.arc(ix, iy, r, 0, Math.PI*2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+  }
+
+  // Grenade trails (smooth by interpolating tip between sampled ticks)
+  const grenadeTrailStart = interpTick - 20;
+  for (const rows of Object.values(roundGrenadesByEntity)) {
+    if (!rows || rows.length === 0) continue;
+
+    const prev = latestRowAtOrBefore(rows, interpTick);
+    if (!prev) continue;
+
+    const pts = [];
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const row = rows[i];
+      if (row.tick > interpTick) continue;
+      if (row.tick < grenadeTrailStart) break;
+      pts.push(row);
+    }
+    pts.reverse();
+
+    const next = firstRowAfter(rows, interpTick);
+    if (next && next.tick > prev.tick) {
+      const a = (interpTick - prev.tick) / (next.tick - prev.tick);
+      pts.push({
+        ...prev,
+        X: prev.X + (next.X - prev.X) * a,
+        Y: prev.Y + (next.Y - prev.Y) * a,
+        Z: (prev.Z ?? 0) + ((next.Z ?? 0) - (prev.Z ?? 0)) * a,
+      });
+    }
+
+    if (pts.length < 2) continue;
+
+    const gtype = pts[0].grenade_type || prev.grenade_type || 'smoke';
+    let col = 'rgba(150,220,150,0.6)';
+    if (gtype === 'flashbang')  col = 'rgba(255,255,180,0.7)';
+    if (gtype === 'smoke')       col = 'rgba(200,200,230,0.6)';
+    if (gtype === 'molotov' || gtype === 'incgrenade') col = 'rgba(255,120,30,0.7)';
+    if (gtype === 'hegrenade')   col = 'rgba(100,220,100,0.7)';
+    ctx.beginPath();
+    const [px0, py0] = worldToCanvas(pts[0].X, pts[0].Y);
+    ctx.moveTo(px0, py0);
+    for (let i = 1; i < pts.length; i++) {
+      const [gx, gy] = worldToCanvas(pts[i].X, pts[i].Y);
+      ctx.lineTo(gx, gy);
+    }
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([3, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Draw tip
+    const last = pts[pts.length-1];
+    const [lx, ly] = worldToCanvas(last.X, last.Y);
+    ctx.beginPath();
+    ctx.arc(lx, ly, 4, 0, Math.PI*2);
+    ctx.fillStyle = col;
+    ctx.fill();
+  }
+
+  // Grenade landing markers
+  for (const gl of grenadeLandings) {
+    if (gl.land_X == null || gl.land_Y == null) continue;
+    const [gx, gy] = worldToCanvas(gl.land_X, gl.land_Y);
+    const gtype = gl.grenade_type || 'grenade';
+    let col = '#99e2b4';
+    if (gtype === 'flashbang') col = '#fff5a6';
+    if (gtype === 'smoke') col = '#bfc6d1';
+    if (gtype === 'molotov' || gtype === 'incgrenade') col = '#ff7f3f';
+    if (gtype === 'hegrenade') col = '#73d673';
+
+    ctx.beginPath();
+    ctx.arc(gx, gy, 6, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(gx, gy, 4, 0, Math.PI * 2);
+    ctx.fillStyle = col;
+    ctx.fill();
+    ctx.strokeStyle = '#111';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // Bomb carrier route
+  if (bombCarrierPath.length > 1) {
+    ctx.beginPath();
+    const [sx, sy] = worldToCanvas(bombCarrierPath[0].X, bombCarrierPath[0].Y);
+    ctx.moveTo(sx, sy);
+    for (let i = 1; i < bombCarrierPath.length; i++) {
+      const p = bombCarrierPath[i];
+      if (p.X == null || p.Y == null) continue;
+      const [bx, by] = worldToCanvas(p.X, p.Y);
+      ctx.lineTo(bx, by);
+    }
+    ctx.strokeStyle = 'rgba(255,224,122,0.95)';
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([7, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    const lastCarrier = bombCarrierPath[bombCarrierPath.length - 1];
+    if (lastCarrier.X != null && lastCarrier.Y != null) {
+      const [lx, ly] = worldToCanvas(lastCarrier.X, lastCarrier.Y);
+      ctx.beginPath();
+      ctx.arc(lx, ly, 7, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,224,122,0.4)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(lx, ly, 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffe07a';
+      ctx.fill();
+    }
+  }
+
+  // Kill flashes
+  for (const kf of killFlashes) {
+    const alpha = kf.ttl / 90;
+    const [kx, ky] = worldToCanvas(kf.vicX, kf.vicY);
+    // Red X
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = '#ff3333';
+    ctx.lineWidth = 2.5;
+    const sz = 8;
+    ctx.beginPath();
+    ctx.moveTo(kx - sz, ky - sz); ctx.lineTo(kx + sz, ky + sz);
+    ctx.moveTo(kx + sz, ky - sz); ctx.lineTo(kx - sz, ky + sz);
+    ctx.stroke();
+    // Line attacker → victim
+    if (kf.attX != null) {
+      const [ax, ay] = worldToCanvas(kf.attX, kf.attY);
+      ctx.strokeStyle = 'rgba(255,80,80,0.35)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(kx, ky);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    // Weapon label
+    ctx.fillStyle = 'rgba(255,80,80,0.9)';
+    ctx.font = '9px Inter';
+    ctx.fillText(kf.weapon, kx + 10, ky - 4);
+    ctx.restore();
+  }
+
+  // Bomb
+  if (bombState) {
+    const bInRound = bombEvents;
+    const lastBomb = bInRound.length ? bInRound[bInRound.length - 1] : null;
+    if (lastBomb && lastBomb.X != null) {
+      const [bx, by] = worldToCanvas(lastBomb.X, lastBomb.Y);
+      const pulse = 0.3 + 0.2 * Math.sin(Date.now() / 300);
+      ctx.beginPath();
+      ctx.arc(bx, by, 10 + pulse * 4, 0, Math.PI*2);
+      ctx.fillStyle = `rgba(245,166,35,${0.15 + pulse * 0.2})`;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(bx, by, 7, 0, Math.PI*2);
+      ctx.fillStyle = '#f5a623';
+      ctx.fill();
+      ctx.fillStyle = '#000';
+      ctx.font = 'bold 8px Inter';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const bombChar = lastBomb.event === 'plant' ? '✦' :
+                       lastBomb.event === 'defuse' ? 'D' :
+                       lastBomb.event === 'explode' ? '💥' : 'C';
+      ctx.fillText(bombChar, bx, by);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+    }
+  }
+
+  // Players
+  const playersArr = Object.values(playerSnap);
+  const deadInRound = new Set(roundKills.map(k => String(k.victim_steamid)));
+
+  for (const p of playersArr) {
+    if (p.X == null || p.Y == null) continue;
+    const sid    = String(p.steamid);
+    const isAlive = p.is_alive !== false && !deadInRound.has(sid);
+    const side = normalizeTeam(p.team_name || p.side);
+    const isCT = side === 'ct' ? true : side === 't' ? false : null;
+    const clr    = isCT === true ? '#4a9eff' : isCT === false ? '#ff6b35' : '#888';
+    const hp     = p.health || 0;
+
+    // Interpolate towards next sampled row for smoother visuals at low sample rates.
+    const pNext = playerSnapNext[sid] || p;
+    const x1 = typeof p.X === 'number' ? p.X : null;
+    const y1 = typeof p.Y === 'number' ? p.Y : null;
+    const x2 = typeof pNext.X === 'number' ? pNext.X : x1;
+    const y2 = typeof pNext.Y === 'number' ? pNext.Y : y1;
+    const ix = x1 != null && x2 != null ? (x1 + (x2 - x1) * renderInterp) : p.X;
+    const iy = y1 != null && y2 != null ? (y1 + (y2 - y1) * renderInterp) : p.Y;
+
+    const [px, py] = worldToCanvas(ix, iy);
+
+    ctx.save();
+    ctx.globalAlpha = isAlive ? 1 : 0.25;
+
+    // Shadow
+    ctx.shadowColor = clr;
+    ctx.shadowBlur  = isAlive ? 8 : 0;
+
+    // Circle fill
+    ctx.beginPath();
+    ctx.arc(px, py, 9, 0, Math.PI*2);
+    ctx.fillStyle = isAlive ? clr : '#444';
+    ctx.fill();
+    ctx.strokeStyle = isAlive ? '#fff' : '#666';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.shadowBlur = 0;
+
+    // HP bar
+    if (isAlive) {
+      const barW = 18;
+      const barH = 3;
+      const barX = px - barW / 2;
+      const barY = py + 12;
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(barX, barY, barW, barH);
+      const hpFrac = Math.max(0, Math.min(hp / 100, 1));
+      const hpClr  = hp > 50 ? '#4caf50' : hp > 25 ? '#ff9800' : '#f44336';
+      ctx.fillStyle = hpClr;
+      ctx.fillRect(barX, barY, barW * hpFrac, barH);
+    }
+
+    // Direction indicator (yaw)
+    if (isAlive && p.yaw != null) {
+      const yawRad = (p.yaw * Math.PI) / 180;
+      const dirX = px + Math.cos(yawRad) * 14;
+      const dirY = py - Math.sin(yawRad) * 14;
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(dirX, dirY);
+      ctx.stroke();
+    }
+
+    // Name label
+    ctx.fillStyle = '#fff';
+    ctx.font = `${isAlive ? 'bold' : 'normal'} 9px Inter`;
+    ctx.textAlign = 'center';
+    ctx.fillText(p.name || sid, px, py - 13);
+    ctx.textAlign = 'left';
+
+    ctx.restore();
+  }
+
+  // Tick display
+  document.getElementById('tickDisplay').textContent = `Tick: ${currentTick}`;
+
+  // Update scoreboard
+  updateScoreboard(playerSnap, deadInRound, roundKills);
+
+  // If infernos active, keep redrawing for animation
+  if (activeInfernos.length > 0 || killFlashes.length > 0) {
+    if (!playing) {
+      // Request single repaint for animation
+      requestAnimationFrame(() => {
+        if (!playing) renderFrame();
+      });
+    }
+  }
+}
+
+function drawGrid() {
+  ctx.fillStyle = '#0c0e14';
+  ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+  if (drawMapLayer && mapImageReady && mapImage) {
+    ctx.save();
+    ctx.globalAlpha = 0.65;
+    ctx.drawImage(mapImage, 0, 0, CANVAS_SIZE, CANVAS_SIZE);
+    ctx.restore();
+  }
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  ctx.lineWidth = 1;
+  const step = CANVAS_SIZE / 16;
+  for (let i = 0; i <= CANVAS_SIZE; i += step) {
+    ctx.beginPath();
+    ctx.moveTo(i, 0); ctx.lineTo(i, CANVAS_SIZE);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, i); ctx.lineTo(CANVAS_SIZE, i);
+    ctx.stroke();
+  }
+
+  // Map name watermark
+  if (DATA) {
+    ctx.fillStyle = 'rgba(255,255,255,0.04)';
+    ctx.font = 'bold 48px Inter';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(DATA.meta.map_name || '', CANVAS_SIZE/2, CANVAS_SIZE/2);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  SCOREBOARD UPDATE
+// ═══════════════════════════════════════════════════════════════════════════════
+function updateScoreboard(playerSnap, deadSet, roundKills) {
+  const sb = document.getElementById('scoreboardContent');
+  const players = Object.values(playerSnap);
+
+  const ctPlayers = players.filter(p => normalizeTeam(p.team_name || p.side) === 'ct');
+  const tPlayers  = players.filter(p => normalizeTeam(p.team_name || p.side) === 't');
+
+  const roundScore = {};
+  for (const k of roundKills) {
+    const sid = String(k.attacker_steamid);
+    roundScore[sid] = (roundScore[sid] || 0) + 1;
+  }
+
+  function renderTeam(team, label, cls) {
+    let html = `<div class="team-header ${cls}">${label}</div>`;
+    for (const p of team) {
+      const sid = String(p.steamid);
+      const dead = deadSet.has(sid) || p.is_alive === false;
+      const hp = p.health || 0;
+      const money = p.cash ?? p.current_equip_value ?? 0;
+      const kills = playerKills[sid] || 0;
+      let weaponRaw = p.active_weapon;
+      if (Array.isArray(weaponRaw)) {
+        weaponRaw = weaponRaw[0] ?? '';
+      } else if (weaponRaw && typeof weaponRaw === 'object') {
+        weaponRaw = weaponRaw.name ?? weaponRaw.weapon ?? '';
+      }
+      const weapon = String(weaponRaw || '').replace(/^weapon_/, '') || '-';
+      html += `<div class="player-row${dead?' dead':''}">
+        <span class="player-name">${p.name||sid}</span>
+        <span class="player-hp${hp<26?' low':''}">${dead?'☠':hp}</span>
+        <span class="kd-stat">${kills}</span>
+        <span class="money">$${money}</span>
+        <span class="weapon-tag">${weapon}</span>
+      </div>`;
+    }
+    return html;
+  }
+
+  sb.innerHTML = renderTeam(ctPlayers, '▣ Counter-Terrorist', 'ct') +
+                 renderTeam(tPlayers,  '▣ Terrorist',         't');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  EVENT LOG
+// ═══════════════════════════════════════════════════════════════════════════════
+let eventQueue = [];
+function addEvent(icon, text, sub) {
+  eventQueue.unshift({ icon, text, sub, isHtml: false });
+  if (eventQueue.length > 30) eventQueue.pop();
+  const log = document.getElementById('eventLog');
+  log.innerHTML = eventQueue.slice(0, 12).map(e =>
+    `<div class="evt">
+      <span class="evt-icon">${e.icon}</span>
+      <span class="evt-text">${e.isHtml ? e.text : `${e.text}${e.sub?` <em style="color:var(--text2)">[${e.sub}]</em>`:''}`}</span>
+    </div>`
+  ).join('');
+}
+
+function addKillEvent(kill) {
+  const atkTeam = normalizeTeam(kill.attacker_team_name || kill.attacker_side || kill.attacker_team || '');
+  const vicTeam = normalizeTeam(kill.victim_team_name || kill.victim_side || kill.victim_team || '');
+  const attacker = kill.attacker_name || '?';
+  const victim = kill.victim_name || '?';
+  const weapon = kill.weapon || '?';
+  const hs = kill.is_headshot || kill.headshot ? '<span class="kill-hs">HS</span>' : '';
+
+  const atkClass = atkTeam === 'ct' ? 'kill-name-ct' : atkTeam === 't' ? 'kill-name-t' : 'kill-name-neutral';
+  const vicClass = vicTeam === 'ct' ? 'kill-name-ct' : vicTeam === 't' ? 'kill-name-t' : 'kill-name-neutral';
+
+  const html = `<div class="kill-row">
+      <span class="kill-side-left ${atkClass}">${attacker}</span>
+      <span class="kill-weapon">${weapon}${hs}</span>
+      <span class="kill-side-right ${vicClass}">${victim}</span>
+    </div>`;
+
+  eventQueue.unshift({ icon: '⚔', text: html, sub: null, isHtml: true });
+  if (eventQueue.length > 30) eventQueue.pop();
+
+  const log = document.getElementById('eventLog');
+  log.innerHTML = eventQueue.slice(0, 12).map(e =>
+    `<div class="evt">
+      <span class="evt-icon">${e.icon}</span>
+      <span class="evt-text">${e.isHtml ? e.text : `${e.text}${e.sub?` <em style="color:var(--text2)">[${e.sub}]</em>`:''}`}</span>
+    </div>`
+  ).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  INITIAL CANVAS DRAW
+// ═══════════════════════════════════════════════════════════════════════════════
+canvas.width  = CANVAS_SIZE;
+canvas.height = CANVAS_SIZE;
+drawGrid();
+</script>
+</body>
+</html>
