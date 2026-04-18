@@ -94,6 +94,16 @@
       flex-direction: column;
       overflow: hidden;
     }
+    body.scoreboard-full .sidebar {
+      width: 440px;
+    }
+    body.scoreboard-full .sidebar .sidebar-section:not(.scoreboard) {
+      display: none;
+    }
+    body.scoreboard-full .sidebar .sidebar-section.scoreboard {
+      border-bottom: none;
+      flex: 1;
+    }
 
     .sidebar-section {
       border-bottom: 1px solid var(--border);
@@ -114,6 +124,25 @@
       overflow-y: auto;
       flex: 1;
     }
+    .scoreboard-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .scoreboard-title button {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      border-radius: 5px;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 8px;
+      cursor: pointer;
+      text-transform: none;
+      letter-spacing: .2px;
+    }
+    .scoreboard-title button:hover { background: var(--border); }
     .team-header {
       padding: 6px 14px;
       font-size: 11px;
@@ -125,7 +154,7 @@
     .team-header.t  { color: var(--t);  background: rgba(255,107,53,.07); }
     .player-row {
       display: grid;
-      grid-template-columns: 1fr 40px 40px 50px 40px;
+      grid-template-columns: 1fr 34px 28px 28px 28px 52px 56px;
       align-items: center;
       padding: 5px 14px;
       font-size: 11px;
@@ -144,7 +173,7 @@
     .player-hp.low { color: var(--red); }
     .col-hdr {
       display: grid;
-      grid-template-columns: 1fr 40px 40px 50px 40px;
+      grid-template-columns: 1fr 34px 28px 28px 28px 52px 56px;
       padding: 4px 14px;
       font-size: 9px;
       color: var(--text2);
@@ -207,6 +236,13 @@
       line-height: 1.35;
       border-bottom: 1px solid rgba(255,255,255,.03);
       color: var(--text2);
+    }
+    .timeline-item.clickable {
+      cursor: pointer;
+      transition: background .12s;
+    }
+    .timeline-item.clickable:hover {
+      background: rgba(255,255,255,.05);
     }
     .timeline-item strong {
       color: var(--text);
@@ -515,9 +551,12 @@
 
     <!-- Scoreboard -->
     <div class="sidebar-section scoreboard">
-      <div class="sidebar-title">Scoreboard</div>
+      <div class="sidebar-title scoreboard-title">
+        <span>Scoreboard</span>
+        <button id="toggleScoreboardFull" type="button">Full</button>
+      </div>
       <div class="col-hdr">
-        <span>Player</span><span>HP</span><span>K</span><span>$</span><span>Weapon</span>
+        <span>Player</span><span>HP</span><span>K</span><span>D</span><span>A</span><span>$</span><span>Weapon</span>
       </div>
       <div id="scoreboardContent"></div>
     </div>
@@ -596,6 +635,11 @@ let animId      = null;
 let lastTs      = null;
 let ticksInRound= [];        // sorted unique ticks for current round
 let playerKills = {};        // {steamid: kills}
+let playerDeaths = {};       // {steamid: deaths}
+let playerAssists = {};      // {steamid: assists}
+let playerKillsByName = {};  // {normalized player name: kills}
+let playerDeathsByName = {}; // {normalized player name: deaths}
+let playerAssistsByName = {}; // {normalized player name: assists}
 let killFlashes = [];        // [{tick, attX, attY, vicX, vicY, weapon, ttl}]
 let lastEventKey = null;     // prevent duplicate events on repaint
 let mapImage = null;         // optional radar image
@@ -613,6 +657,7 @@ let roundGrenadesByEntity = {}; // {entity_id: [grenade rows sorted by tick]}
 let roundGrenadeLandings = []; // grenade landings for active round
 let roundBombCarrierPath = []; // bomb carrier path for active round
 let currentMapName = 'unknown';
+let scoreboardExpanded = false;
 
 const canvas  = document.getElementById('mapCanvas');
 const ctx     = canvas.getContext('2d');
@@ -634,6 +679,38 @@ const DEBUG_ENABLED = false;
 
 const MAP_ALIGN_DEFAULT = { scale: 1.0, offsetX: 0, offsetY: 0 };
 let mapAlign = { ...MAP_ALIGN_DEFAULT };
+let mapAlignBaseline = { ...MAP_ALIGN_DEFAULT };
+
+function normalizeMapAlign(value, fallback = MAP_ALIGN_DEFAULT) {
+  if (!value || typeof value !== 'object') return { ...fallback };
+
+  const rawScale = Number(value.scale);
+  const rawOffsetX = Number(value.offsetX ?? value.offset_x);
+  const rawOffsetY = Number(value.offsetY ?? value.offset_y);
+
+  return {
+    scale: Number.isFinite(rawScale) ? rawScale : fallback.scale,
+    offsetX: Number.isFinite(rawOffsetX) ? rawOffsetX : fallback.offsetX,
+    offsetY: Number.isFinite(rawOffsetY) ? rawOffsetY : fallback.offsetY,
+  };
+}
+
+function shouldPreferMetaCalibration(calibrationMeta) {
+  const source = String(calibrationMeta?.source || '').toLowerCase();
+  if (source === 'sidecar') return true;
+
+  // Do not overwrite manual/local values with neutral preset defaults.
+  if (source === 'preset') {
+    const normalized = normalizeMapAlign(calibrationMeta, MAP_ALIGN_DEFAULT);
+    const isNeutral =
+      normalized.scale === MAP_ALIGN_DEFAULT.scale &&
+      normalized.offsetX === MAP_ALIGN_DEFAULT.offsetX &&
+      normalized.offsetY === MAP_ALIGN_DEFAULT.offsetY;
+    return !isNeutral;
+  }
+
+  return false;
+}
 
 function mapAlignStorageKey(mapName) {
   return `cs2replay.mapAlign.${String(mapName || 'unknown').toLowerCase()}`;
@@ -643,18 +720,11 @@ function loadMapAlign(mapName) {
   const normalized = String(mapName || 'unknown').toLowerCase();
   try {
     const raw = localStorage.getItem(mapAlignStorageKey(normalized));
-    if (!raw) return { ...MAP_ALIGN_DEFAULT };
+    if (!raw) return null;
     const parsed = JSON.parse(raw);
-    const scale = Number(parsed?.scale);
-    const offsetX = Number(parsed?.offsetX);
-    const offsetY = Number(parsed?.offsetY);
-    return {
-      scale: Number.isFinite(scale) ? scale : MAP_ALIGN_DEFAULT.scale,
-      offsetX: Number.isFinite(offsetX) ? offsetX : MAP_ALIGN_DEFAULT.offsetX,
-      offsetY: Number.isFinite(offsetY) ? offsetY : MAP_ALIGN_DEFAULT.offsetY,
-    };
+    return normalizeMapAlign(parsed, mapAlignBaseline);
   } catch {
-    return { ...MAP_ALIGN_DEFAULT };
+    return null;
   }
 }
 
@@ -703,7 +773,7 @@ function bindMapAlignControls() {
 
   if (resetBtn) {
     resetBtn.addEventListener('click', () => {
-      mapAlign = { ...MAP_ALIGN_DEFAULT };
+      mapAlign = { ...mapAlignBaseline };
       updateMapAlignUI();
       saveMapAlign(currentMapName, mapAlign);
       renderFrame();
@@ -727,6 +797,47 @@ document.getElementById('trailToggle').addEventListener('change', e => {
 document.getElementById('mapToggle').addEventListener('change', e => {
   drawMapLayer = e.target.checked;
   renderFrame();
+});
+
+document.getElementById('toggleScoreboardFull').addEventListener('click', () => {
+  scoreboardExpanded = !scoreboardExpanded;
+  document.body.classList.toggle('scoreboard-full', scoreboardExpanded);
+  const btn = document.getElementById('toggleScoreboardFull');
+  if (btn) btn.textContent = scoreboardExpanded ? 'Close' : 'Full';
+});
+
+function seekToTick(targetTick) {
+  if (!ticksInRound.length || !Number.isFinite(targetTick)) return;
+
+  let lo = 0;
+  let hi = ticksInRound.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (ticksInRound[mid] < targetTick) lo = mid + 1;
+    else hi = mid;
+  }
+
+  let idx = lo;
+  if (idx > 0) {
+    const left = ticksInRound[idx - 1];
+    const right = ticksInRound[idx];
+    if (Math.abs(left - targetTick) <= Math.abs(right - targetTick)) idx = idx - 1;
+  }
+
+  tickIdx = idx;
+  programmaticSliderUpdate = true;
+  document.getElementById('tickSlider').value = tickIdx;
+  programmaticSliderUpdate = false;
+  renderFrame();
+}
+
+document.getElementById('timelineLog').addEventListener('click', e => {
+  const item = e.target.closest('.timeline-item.clickable');
+  if (!item) return;
+  const targetTick = Number(item.dataset.tick);
+  if (!Number.isFinite(targetTick)) return;
+  stopPlay();
+  seekToTick(targetTick);
 });
 
 function loadMapImage(src) {
@@ -844,6 +955,53 @@ function normalizeTeam(teamName) {
   return null;
 }
 
+function normalizePlayerName(name) {
+  return String(name || '').trim().toLowerCase();
+}
+
+function buildLiveStats(currentRoundNum, currentTick) {
+  const liveKills = {};
+  const liveDeaths = {};
+  const liveAssists = {};
+  const liveKillsByName = {};
+  const liveDeathsByName = {};
+  const liveAssistsByName = {};
+
+  for (const k of (DATA?.kills || [])) {
+    const kRound = Number(k.round_num);
+    const kTick = Number(k.tick);
+    if (!Number.isFinite(kRound) || !Number.isFinite(kTick)) continue;
+
+    if (kRound > currentRoundNum) continue;
+    if (kRound === currentRoundNum && kTick > currentTick) continue;
+
+    const attackerSid = k.attacker_steamid != null ? String(k.attacker_steamid) : null;
+    const victimSid = k.victim_steamid != null ? String(k.victim_steamid) : null;
+    const assisterSid = k.assister_steamid != null ? String(k.assister_steamid) : null;
+
+    const attackerName = normalizePlayerName(k.attacker_name);
+    const victimName = normalizePlayerName(k.victim_name);
+    const assisterName = normalizePlayerName(k.assister_name);
+
+    if (attackerSid) liveKills[attackerSid] = (liveKills[attackerSid] || 0) + 1;
+    if (victimSid) liveDeaths[victimSid] = (liveDeaths[victimSid] || 0) + 1;
+    if (assisterSid) liveAssists[assisterSid] = (liveAssists[assisterSid] || 0) + 1;
+
+    if (attackerName) liveKillsByName[attackerName] = (liveKillsByName[attackerName] || 0) + 1;
+    if (victimName) liveDeathsByName[victimName] = (liveDeathsByName[victimName] || 0) + 1;
+    if (assisterName) liveAssistsByName[assisterName] = (liveAssistsByName[assisterName] || 0) + 1;
+  }
+
+  return {
+    kills: liveKills,
+    deaths: liveDeaths,
+    assists: liveAssists,
+    killsByName: liveKillsByName,
+    deathsByName: liveDeathsByName,
+    assistsByName: liveAssistsByName,
+  };
+}
+
 function latestRowAtOrBefore(rows, tick) {
   if (!rows || rows.length === 0) return null;
   let lo = 0;
@@ -906,7 +1064,7 @@ function buildRoundTimeline(roundNumber) {
     .slice(0, 8);
 
   for (const k of kills) {
-    lines.push(`<div class="timeline-item">T${k.tick}: <strong>${k.attacker_name || '?'}</strong> -> ${k.victim_name || '?'} [${k.weapon || '?'}]</div>`);
+    lines.push(`<div class="timeline-item clickable" data-tick="${k.tick}">T${k.tick}: <strong>${k.attacker_name || '?'}</strong> -> ${k.victim_name || '?'} [${k.weapon || '?'}]</div>`);
   }
 
   const bombEvents = DATA.bomb
@@ -949,7 +1107,16 @@ document.body.addEventListener('drop', e => {
 function loadData(data) {
   DATA = data;
   currentMapName = data?.meta?.map_name || 'unknown';
-  mapAlign = loadMapAlign(currentMapName);
+  const metaCalibration = data?.meta?.map_calibration;
+  mapAlignBaseline = normalizeMapAlign(metaCalibration, MAP_ALIGN_DEFAULT);
+
+  if (shouldPreferMetaCalibration(metaCalibration)) {
+    mapAlign = { ...mapAlignBaseline };
+    saveMapAlign(currentMapName, mapAlign);
+  } else {
+    mapAlign = loadMapAlign(currentMapName) || { ...mapAlignBaseline };
+  }
+
   updateMapAlignUI();
   document.getElementById('overlay').classList.add('hidden');
 
@@ -1001,9 +1168,26 @@ function loadData(data) {
 
   // Compute kill totals per steamid
   playerKills = {};
-  for (const k of data.kills) {
-    const sid = k.attacker_steamid ? String(k.attacker_steamid) : null;
-    if (sid) playerKills[sid] = (playerKills[sid] || 0) + 1;
+  playerDeaths = {};
+  playerAssists = {};
+  playerKillsByName = {};
+  playerDeathsByName = {};
+  playerAssistsByName = {};
+  for (const row of (data.player_stats || [])) {
+    const sid = row?.steamid != null ? String(row.steamid) : null;
+    const nameKey = normalizePlayerName(row?.name);
+    const kills = Number(row.kills) || 0;
+    const deaths = Number(row.deaths) || 0;
+    const assists = Number(row.assists) || 0;
+    if (!sid) continue;
+    playerKills[sid] = kills;
+    playerDeaths[sid] = deaths;
+    playerAssists[sid] = assists;
+    if (nameKey) {
+      playerKillsByName[nameKey] = kills;
+      playerDeathsByName[nameKey] = deaths;
+      playerAssistsByName[nameKey] = assists;
+    }
   }
 
   // Resize canvas
@@ -1596,7 +1780,7 @@ function renderFrame() {
 
     // Circle fill
     ctx.beginPath();
-    ctx.arc(px, py, 9, 0, Math.PI*2);
+    ctx.arc(px, py, 11, 0, Math.PI*2);
     ctx.fillStyle = isAlive ? clr : '#444';
     ctx.fill();
     ctx.strokeStyle = isAlive ? '#fff' : '#666';
@@ -1607,10 +1791,10 @@ function renderFrame() {
 
     // HP bar
     if (isAlive) {
-      const barW = 18;
-      const barH = 3;
+      const barW = 22;
+      const barH = 4;
       const barX = px - barW / 2;
-      const barY = py + 12;
+      const barY = py + 14;
       ctx.fillStyle = 'rgba(0,0,0,0.5)';
       ctx.fillRect(barX, barY, barW, barH);
       const hpFrac = Math.max(0, Math.min(hp / 100, 1));
@@ -1633,10 +1817,15 @@ function renderFrame() {
     }
 
     // Name label
+    const label = p.name || sid;
+    const fontWeight = isAlive ? 'bold' : '500';
+    ctx.font = `${fontWeight} 11px Inter`;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
     ctx.fillStyle = '#fff';
-    ctx.font = `${isAlive ? 'bold' : 'normal'} 9px Inter`;
     ctx.textAlign = 'center';
-    ctx.fillText(p.name || sid, px, py - 13);
+    ctx.strokeText(label, px, py - 16);
+    ctx.fillText(label, px, py - 16);
     ctx.textAlign = 'left';
 
     ctx.restore();
@@ -1645,8 +1834,9 @@ function renderFrame() {
   // Tick display
   document.getElementById('tickDisplay').textContent = `Tick: ${currentTick}`;
 
-  // Update scoreboard
-  updateScoreboard(playerSnap, deadInRound, roundKills);
+  // Update scoreboard with live K/D/A up to current replay tick.
+  const liveStats = buildLiveStats(rNum, currentTick);
+  updateScoreboard(playerSnap, deadInRound, liveStats);
 
   // If infernos active, keep redrawing for animation
   if (activeInfernos.length > 0 || killFlashes.length > 0) {
@@ -1702,27 +1892,24 @@ function drawGrid() {
 // ═══════════════════════════════════════════════════════════════════════════════
 //  SCOREBOARD UPDATE
 // ═══════════════════════════════════════════════════════════════════════════════
-function updateScoreboard(playerSnap, deadSet, roundKills) {
+function updateScoreboard(playerSnap, deadSet, liveStats) {
   const sb = document.getElementById('scoreboardContent');
   const players = Object.values(playerSnap);
 
   const ctPlayers = players.filter(p => normalizeTeam(p.team_name || p.side) === 'ct');
   const tPlayers  = players.filter(p => normalizeTeam(p.team_name || p.side) === 't');
 
-  const roundScore = {};
-  for (const k of roundKills) {
-    const sid = String(k.attacker_steamid);
-    roundScore[sid] = (roundScore[sid] || 0) + 1;
-  }
-
   function renderTeam(team, label, cls) {
     let html = `<div class="team-header ${cls}">${label}</div>`;
     for (const p of team) {
       const sid = String(p.steamid);
+      const nameKey = normalizePlayerName(p.name || sid);
       const dead = deadSet.has(sid) || p.is_alive === false;
       const hp = p.health || 0;
       const money = p.cash ?? p.current_equip_value ?? 0;
-      const kills = playerKills[sid] || 0;
+      const kills = (liveStats.kills[sid] ?? liveStats.killsByName[nameKey] ?? 0);
+      const deaths = (liveStats.deaths[sid] ?? liveStats.deathsByName[nameKey] ?? 0);
+      const assists = (liveStats.assists[sid] ?? liveStats.assistsByName[nameKey] ?? 0);
       let weaponRaw = p.active_weapon;
       if (Array.isArray(weaponRaw)) {
         weaponRaw = weaponRaw[0] ?? '';
@@ -1734,6 +1921,8 @@ function updateScoreboard(playerSnap, deadSet, roundKills) {
         <span class="player-name">${p.name||sid}</span>
         <span class="player-hp${hp<26?' low':''}">${dead?'DEAD':hp}</span>
         <span class="kd-stat">${kills}</span>
+        <span class="kd-stat">${deaths}</span>
+        <span class="kd-stat">${assists}</span>
         <span class="money">$${money}</span>
         <span class="weapon-tag">${weapon}</span>
       </div>`;

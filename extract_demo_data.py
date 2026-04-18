@@ -30,6 +30,18 @@ EXTRA_PLAYER_PROPS = [
     "has_bomb",
 ]
 
+DEFAULT_MAP_CALIBRATION = {
+    "scale": 1.0,
+    "offset_x": 0,
+    "offset_y": 0,
+}
+
+MAP_CALIBRATION_PRESETS: dict[str, dict[str, float | int]] = {
+    # Keep neutral defaults unless a map specific correction is verified.
+    "de_dust2": {"scale": 1.0, "offset_x": 0, "offset_y": 0},
+    "de_inferno": {"scale": 1.0, "offset_x": 0, "offset_y": 0},
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -39,8 +51,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-o",
         "--output",
-        default="demo_data.json",
-        help="Output JSON path (default: demo_data.json)",
+        default=None,
+        help="Output JSON path (default: <demo_file_name>.json)",
     )
     parser.add_argument(
         "--tick-sample",
@@ -138,6 +150,34 @@ def detect_map_image(map_name: str) -> str | None:
     return None
 
 
+def detect_map_calibration(map_name: str) -> dict[str, Any]:
+    base = dict(DEFAULT_MAP_CALIBRATION)
+
+    preset = MAP_CALIBRATION_PRESETS.get(map_name)
+    if preset:
+        base.update(preset)
+        source = "preset"
+    else:
+        source = "default"
+
+    sidecar = Path("maps") / f"{map_name}.calibration.json"
+    if map_name and map_name != "unknown" and sidecar.exists():
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+            scale = float(data.get("scale", base["scale"]))
+            offset_x = int(data.get("offset_x", base["offset_x"]))
+            offset_y = int(data.get("offset_y", base["offset_y"]))
+            base.update({"scale": scale, "offset_x": offset_x, "offset_y": offset_y})
+            source = "sidecar"
+        except Exception as exc:
+            print(f"Warning: failed to parse calibration sidecar '{sidecar}': {exc}")
+
+    return {
+        **base,
+        "source": source,
+    }
+
+
 def has_cols(df: pl.DataFrame | None, cols: list[str]) -> bool:
     if df is None:
         return False
@@ -157,6 +197,75 @@ def make_player_kills(kills_df: pl.DataFrame | None) -> list[dict[str, Any]]:
         .sort("kills", descending=True)
     )
     return grouped.to_dicts()
+
+
+def make_player_stats(kills_df: pl.DataFrame | None) -> list[dict[str, Any]]:
+    """Build per-player K/D/A stats from parsed kill events.
+
+    Values are derived only from kill rows exported by AWPy:
+    - kills   <- attacker_steamid
+    - deaths  <- victim_steamid
+    - assists <- assister_steamid
+    """
+    if kills_df is None or kills_df.is_empty():
+        return []
+
+    stats: dict[str, dict[str, Any]] = {}
+
+    def ensure_player(
+        steamid_value: Any,
+        name_value: Any = None,
+        team_value: Any = None,
+    ) -> dict[str, Any] | None:
+        if steamid_value is None:
+            return None
+
+        sid = str(steamid_value)
+        if sid not in stats:
+            stats[sid] = {
+                "steamid": sid,
+                "name": None,
+                "team_name": None,
+                "kills": 0,
+                "deaths": 0,
+                "assists": 0,
+            }
+
+        row = stats[sid]
+        if row["name"] in (None, "") and name_value not in (None, ""):
+            row["name"] = name_value
+        if row["team_name"] in (None, "") and team_value not in (None, ""):
+            row["team_name"] = team_value
+        return row
+
+    for k in kills_df.to_dicts():
+        attacker = ensure_player(
+            k.get("attacker_steamid"),
+            k.get("attacker_name"),
+            k.get("attacker_team_name") or k.get("attacker_side"),
+        )
+        if attacker is not None:
+            attacker["kills"] += 1
+
+        victim = ensure_player(
+            k.get("victim_steamid"),
+            k.get("victim_name"),
+            k.get("victim_team_name") or k.get("victim_side"),
+        )
+        if victim is not None:
+            victim["deaths"] += 1
+
+        assister = ensure_player(
+            k.get("assister_steamid"),
+            k.get("assister_name"),
+            k.get("assister_team_name") or k.get("assister_side"),
+        )
+        if assister is not None:
+            assister["assists"] += 1
+
+    rows = list(stats.values())
+    rows.sort(key=lambda r: (r["kills"], -r["deaths"], r["assists"]), reverse=True)
+    return rows
 
 
 def make_grenade_landings(grenades_df: pl.DataFrame | None) -> list[dict[str, Any]]:
@@ -230,9 +339,11 @@ def build_export(demo: Demo, args: argparse.Namespace) -> dict[str, Any]:
     bomb_carrier_path = make_bomb_carrier_path(demo.ticks)
     grenade_landings = make_grenade_landings(demo.grenades)
     player_kills = make_player_kills(demo.kills)
+    player_stats = make_player_stats(demo.kills)
     map_name = demo.header.get("map_name", "unknown")
     map_bounds = compute_map_bounds(demo.ticks)
     map_image = detect_map_image(map_name)
+    map_calibration = detect_map_calibration(map_name)
 
     return {
         "meta": {
@@ -244,6 +355,7 @@ def build_export(demo: Demo, args: argparse.Namespace) -> dict[str, Any]:
             "grenade_sample": grenade_sample,
             "map_bounds": map_bounds,
             "map_image": map_image,
+            "map_calibration": map_calibration,
             "has_bomb_carrier_path": len(bomb_carrier_path) > 0,
         },
         "rounds": df_to_records(demo.rounds),
@@ -258,6 +370,7 @@ def build_export(demo: Demo, args: argparse.Namespace) -> dict[str, Any]:
         "bomb_carrier_path": [{k: safe_value(v) for k, v in row.items()} for row in bomb_carrier_path],
         "grenade_landings": [{k: safe_value(v) for k, v in row.items()} for row in grenade_landings],
         "player_kills": [{k: safe_value(v) for k, v in row.items()} for row in player_kills],
+        "player_stats": [{k: safe_value(v) for k, v in row.items()} for row in player_stats],
     }
 
 
@@ -268,7 +381,7 @@ def main() -> None:
     if not demo_path.exists():
         raise FileNotFoundError(f"Demo file not found: {demo_path}")
 
-    output_path = Path(args.output)
+    output_path = Path(args.output) if args.output else demo_path.with_suffix(".json")
 
     print(f"Parsing demo: {demo_path}")
     demo = parse_demo(args)
@@ -297,6 +410,7 @@ def main() -> None:
         "bomb_carrier_path",
         "grenade_landings",
         "player_kills",
+        "player_stats",
     ]:
         print(f"  {key:<17} {len(payload.get(key, [])):,}")
 
