@@ -1,75 +1,98 @@
 # CS2 Demo to 2D Replay (AWPy)
 
-Bu proje, CS2 `.dem` dosyasindan AWPy ile detayli veri cikarip `replay_tool.html` icinde 2D replay olarak gosterir.
+This project extracts rich data from a CS2 `.dem` file with AWPy and renders it in `replay_tool.html` as a 2D replay.
 
-## Neler Cekiliyor?
+## What Is Extracted
 
-- Oyuncu: isim, steamid, takim, pozisyon `(X, Y, Z)`, can, armor, silah, para (`cash` varsa)
-- Olaylar: kill, damage, shot, smoke, inferno, bomb eventleri
-- Bomba:
-- Event bazli bomb kayitlari (`plant`, `defuse`, `explode`, vb.)
-- Bomba tasiyici rotasi (`bomb_carrier_path`) eger `has_bomb` verisi parse edilirse
-- Utility:
-- Grenade trajeleri (`grenades`)
-- Grenade hedef/inis noktasi (`grenade_landings`)
+- Player state: name, steamid, team, position `(X, Y, Z)`, health, armor, weapon, and money if available
+- Events: kills, damages, shots, smokes, infernos, and bomb events
+- Bomb data:
+- Event records such as `plant`, `defuse`, and `explode`
+- Bomb carrier route (`bomb_carrier_path`) when `has_bomb` is available
+- Utility data:
+- Grenade trajectories (`grenades`)
+- Grenade landing points (`grenade_landings`)
 
-## Kurulum ve Veri Çıkarma
+## Data Extraction Options
 
-### Seçenek 1: Notebook (Önerilen - Kolay)
+### Option 1: Notebook (step by step)
 
-1. `demo_to_data.ipynb` dosyasını VS Code'da aç
-2. Üst kısımda kernel seç (Python 3.x)
-3. Hücre 1 → Hücre 2 → ... → sırayla çalıştır ("Run Cell" butonu)
-4. Hücre 9'da `demo_data.json` otomatik oluşturulur
+Use `demo_to_data.ipynb` if you want to inspect the data while exporting.
 
-### Seçenek 2: Command Line (CLI)
+1. Open `demo_to_data.ipynb` in VS Code.
+2. Select a Python 3 kernel.
+3. Run cells in order.
+4. The notebook generates `demo_data.json` in the final export cell.
+
+### Option 2: Command Line Script (single run)
+
+Use `extract_demo_data.py` for repeatable one command exports.
 
 ```bash
 py -m pip install awpy polars
 py extract_demo_data.py vita-auro.dem -o demo_data.json --tick-sample 4 --grenade-sample 2
 ```
 
-Parametreler:
+Arguments:
 
-- `--tick-sample`: her N tickten 1 kayit alir (dosya boyutunu dusurur)
-- `--grenade-sample`: grenade trajelerini seyrekleştirir
-- `--verbose`: AWPy parse loglarini acar
+- `--tick-sample`: keeps one of every N ticks to reduce output size
+- `--grenade-sample`: sparsifies grenade trajectory rows
+- `--verbose`: enables AWPy parse logs
 
-> Not: `python` yerine `py` kullan (Windows Python launcher)
+Note: On Windows, prefer `py` instead of `python`.
 
-## Replay Tool Kullanimi
+## Notebook vs Script
 
-1. `replay_tool.html` dosyasini tarayicida ac.
-2. `demo_data.json` dosyasini yukle.
-3. Round sec, tick slider ile gez, play tusu ile replay baslat.
+Both produce `demo_data.json`, but they are not exactly the same workflow.
 
-## Yeni Eklenen Gorseller
+- Notebook:
+- Interactive analysis plus export
+- Better for exploring tables and verifying data manually
 
-- Bomba tasiyici rotasi: sari kesikli cizgi
-- Grenade hedef noktasi: utility tipine gore renkli marker
-- Event log tekrari engelleme: ayni tickte repaint oldugunda log spam yapmaz
-- Round timeline paneli: round icindeki kill/bomb olaylarini listeler
-- Oyuncu trail gorunumu: son birkac saniyelik hareket izi
-- Opsiyonel map katmani: JSON icindeki `meta.map_image` varsa arkaplanda cizer
+- Script:
+- One shot export from CLI
+- Better for automation and consistent output
+- Uses tick sampling that preserves all player rows for kept ticks
 
-## Map Gorseli Kullanimi (Opsiyonel)
+## Replay Tool Usage
 
-- Notebook export hucresinde `meta.map_image` alanina bir yol veya URL verebilirsin.
-- Ornek: `maps/de_dust2.png`
-- Replay icinde `Map` toggle ile acip kapatabilirsin.
+1. Open `replay_tool.html` in a browser.
+2. Load `demo_data.json`.
+3. Select rounds, scrub with the tick slider, or press play.
 
-## Notlar ve Sorun Giderme
+## Visual Features in Replay Tool
 
-- `cash` veya `has_bomb` gibi ekstra alanlar demo/awpy sürümüne göre olmayabilir.
-- Script, ekstra alanlarla parse başarısız olursa temel player property listesi ile tekrar dener.
+- Bomb carrier route as a dashed path
+- Grenade landing markers by utility type
+- Round timeline panel for kill and bomb events
+- Player trail view for recent movement
+- Optional map image layer from `meta.map_image`
+- Per map alignment controls (scale and X/Y offset) stored in localStorage
 
-### "Python bulunamadı" hatası
+## Optional Map Image
 
-- **Çözüm 1:** Notebook ortamı kullan (Seçenek 1 / kolay)
-- **Çözüm 2:** `py` command'ı kullan (Windows Python launcher)
-  ```bash
-  py --version  # Test et
-  py -m pip install awpy polars  # Paketi kur
-  py extract_demo_data.py ...  # Scripti çalıştır
-  ```
-- **Çözüm 3:** Anaconda/Python düzgün kurulu değilse Anaconda Navigator açıp bir environment oluştur
+- In export data, set `meta.map_image` to a local path or URL
+- Example: `maps/de_dust2.png`
+- Toggle map visibility with the `Map` checkbox in the controls
+
+## Troubleshooting
+
+- Extra props such as `cash` or `has_bomb` may be unavailable depending on demo or AWPy version
+- The script falls back to base player props if extended parsing fails
+
+### Python Not Found on Windows
+
+1. Check launcher:
+
+```bash
+py --version
+```
+
+2. Install packages and run script:
+
+```bash
+py -m pip install awpy polars
+py extract_demo_data.py vita-auro.dem -o demo_data.json
+```
+
+3. If needed, create a clean environment with Anaconda or another Python environment manager.
