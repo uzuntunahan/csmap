@@ -248,6 +248,82 @@
       color: var(--text);
       font-weight: 600;
     }
+    .analysis-log {
+      overflow-y: auto;
+      max-height: 220px;
+      padding: 8px 0;
+    }
+    .analysis-empty {
+      padding: 6px 14px;
+      font-size: 10px;
+      color: var(--text2);
+      line-height: 1.4;
+    }
+    .analysis-summary {
+      padding: 6px 14px;
+      font-size: 10px;
+      color: var(--text);
+      line-height: 1.45;
+      border-bottom: 1px solid rgba(255,255,255,.04);
+    }
+    .analysis-metrics {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 7px 14px 8px;
+      border-bottom: 1px solid rgba(255,255,255,.03);
+    }
+    .metric-chip {
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,.03);
+      border-radius: 999px;
+      font-size: 9px;
+      color: var(--text2);
+      padding: 2px 7px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .analysis-rule {
+      padding: 6px 14px;
+      border-bottom: 1px solid rgba(255,255,255,.03);
+      font-size: 10px;
+      line-height: 1.35;
+      color: var(--text2);
+    }
+    .analysis-rule strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .side-tag {
+      display: inline-block;
+      margin-right: 6px;
+      border-radius: 3px;
+      padding: 1px 4px;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .2px;
+      color: #0f1118;
+      background: #9aa4b2;
+    }
+    .side-tag.ct { background: #61b0ff; }
+    .side-tag.t { background: #ff9a72; }
+    .side-tag.ct-t { background: #d9dde4; }
+    .judge-tag {
+      display: inline-block;
+      margin-right: 6px;
+      border-radius: 3px;
+      padding: 1px 4px;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .2px;
+      color: #0f1118;
+      background: #cbd5e1;
+    }
+    .judge-tag.good { background: #86efac; }
+    .judge-tag.fault { background: #fca5a5; }
+    .judge-tag.neutral { background: #d1d5db; }
+    .sev-high { color: #ff7f7f; }
+    .sev-medium { color: #ffd166; }
+    .sev-info { color: #7dd3fc; }
     .evt {
       padding: 4px 14px;
       font-size: 10px;
@@ -549,6 +625,12 @@
       <div class="timeline-log" id="timelineLog"></div>
     </div>
 
+    <!-- Algorithmic Analysis -->
+    <div class="sidebar-section" style="flex-shrink:0">
+      <div class="sidebar-title">Algorithmic Analysis</div>
+      <div class="analysis-log" id="analysisLog"></div>
+    </div>
+
     <!-- Scoreboard -->
     <div class="sidebar-section scoreboard">
       <div class="sidebar-title scoreboard-title">
@@ -658,6 +740,8 @@ let roundGrenadeLandings = []; // grenade landings for active round
 let roundBombCarrierPath = []; // bomb carrier path for active round
 let currentMapName = 'unknown';
 let scoreboardExpanded = false;
+let roundFeaturesByNum = {}; // {round_num: feature row}
+let roundRuleAnalysisByNum = {}; // {round_num: analysis row}
 
 const canvas  = document.getElementById('mapCanvas');
 const ctx     = canvas.getContext('2d');
@@ -1082,6 +1166,59 @@ function buildRoundTimeline(roundNumber) {
   document.getElementById('timelineLog').innerHTML = lines.join('');
 }
 
+function getSeverityClass(sev) {
+  const s = String(sev || '').toLowerCase();
+  if (s === 'high') return 'sev-high';
+  if (s === 'medium') return 'sev-medium';
+  return 'sev-info';
+}
+
+function buildRoundAnalysis(roundNumber) {
+  const panel = document.getElementById('analysisLog');
+  if (!panel) return;
+
+  const feat = roundFeaturesByNum[roundNumber];
+  const analysis = roundRuleAnalysisByNum[roundNumber];
+
+  if (!feat && !analysis) {
+    panel.innerHTML = '<div class="analysis-empty">No round analysis data found. Re-export JSON with algorithmic features enabled.</div>';
+    return;
+  }
+
+  const metrics = [];
+  if (feat) {
+    metrics.push(`<span class="metric-chip">Entry: ${feat.first_kill_team || '-'}</span>`);
+    metrics.push(`<span class="metric-chip">Trade: ${feat.first_trade_happened ? 'yes' : 'no'}</span>`);
+    metrics.push(`<span class="metric-chip">Plant: ${feat.plant_happened ? (feat.plant_site || 'yes') : 'no'}</span>`);
+    metrics.push(`<span class="metric-chip">Util CT/T: ${(feat.ct_smokes || 0) + (feat.ct_flashes || 0) + (feat.ct_molotovs || 0)}/${(feat.t_smokes || 0) + (feat.t_flashes || 0) + (feat.t_molotovs || 0)}</span>`);
+  }
+
+  const lines = [];
+  if (analysis?.summary) {
+    lines.push(`<div class="analysis-summary"><strong>${analysis.summary}</strong></div>`);
+  }
+  if (metrics.length) {
+    lines.push(`<div class="analysis-metrics">${metrics.join('')}</div>`);
+  }
+
+  const rules = Array.isArray(analysis?.rules) ? analysis.rules : [];
+  if (!rules.length) {
+    lines.push('<div class="analysis-empty">Rules available, but no triggered signals for this round.</div>');
+  } else {
+    for (const r of rules) {
+      const sideRaw = String(r.side || '').toLowerCase();
+      const sideClass = sideRaw === 'ct' ? 'ct' : sideRaw === 't' ? 't' : 'ct-t';
+      const sideLabel = sideRaw === 'ct' ? 'CT' : sideRaw === 't' ? 'T' : 'CT-T';
+      const judgeRaw = String(r.judgement || '').toLowerCase();
+      const judgeClass = judgeRaw === 'good' ? 'good' : judgeRaw === 'fault' ? 'fault' : 'neutral';
+      const judgeLabel = judgeRaw === 'good' ? 'GOOD' : judgeRaw === 'fault' ? 'FAULT' : 'NEUTRAL';
+      lines.push(`<div class="analysis-rule"><span class="side-tag ${sideClass}">${sideLabel}</span><span class="judge-tag ${judgeClass}">${judgeLabel}</span><strong class="${getSeverityClass(r.severity)}">${String(r.severity || 'info').toUpperCase()}</strong> ${r.code || ''}<br>${r.text || ''}</div>`);
+    }
+  }
+
+  panel.innerHTML = lines.join('');
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  FILE LOADING
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1106,6 +1243,16 @@ document.body.addEventListener('drop', e => {
 
 function loadData(data) {
   DATA = data;
+  roundFeaturesByNum = {};
+  roundRuleAnalysisByNum = {};
+
+  for (const row of (data.round_features || [])) {
+    if (row?.round_num != null) roundFeaturesByNum[row.round_num] = row;
+  }
+  for (const row of (data.round_rule_analysis || [])) {
+    if (row?.round_num != null) roundRuleAnalysisByNum[row.round_num] = row;
+  }
+
   currentMapName = data?.meta?.map_name || 'unknown';
   const metaCalibration = data?.meta?.map_calibration;
   mapAlignBaseline = normalizeMapAlign(metaCalibration, MAP_ALIGN_DEFAULT);
@@ -1229,10 +1376,12 @@ function goToRound(idx) {
   if (pip) { pip.classList.add('active'); pip.scrollIntoView({block:'nearest'}); }
 
   document.getElementById('roundLabel').textContent = `Round ${DATA.rounds[roundIdx].round_num}`;
-  buildRoundTimeline(DATA.rounds[roundIdx].round_num);
+  const currentRoundNum = DATA.rounds[roundIdx].round_num;
+  buildRoundTimeline(currentRoundNum);
+  buildRoundAnalysis(currentRoundNum);
 
   // Collect tick indices for this round
-  const rNum = DATA.rounds[roundIdx].round_num;
+  const rNum = currentRoundNum;
   const roundStart = DATA.rounds[roundIdx].freeze_end;
   const roundEnd   = DATA.rounds[roundIdx].end;
 

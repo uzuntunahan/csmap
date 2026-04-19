@@ -65,9 +65,32 @@ Both produce `demo_data.json`, but they are not exactly the same workflow.
 - Bomb carrier route as a dashed path
 - Grenade landing markers by utility type
 - Round timeline panel for kill and bomb events
+- Algorithmic Analysis panel with deterministic round signals
 - Player trail view for recent movement
 - Optional map image layer from `meta.map_image`
 - Per map alignment controls (scale and X/Y offset) stored in localStorage
+
+## Algorithmic Analysis (Rule Engine + ML-ready Features)
+
+The exporter now adds two round-level outputs to `demo_data.json`:
+
+- `round_features`: compact numerical/categorical features per round
+- `round_rule_analysis`: deterministic rules triggered from those features
+
+These are shown in the replay tool under **Algorithmic Analysis**.
+
+### Why this matters
+
+- Makes replay feedback explainable without relying on an LLM
+- Provides ready-to-train tabular data for XGBoost/LightGBM
+- Keeps runtime cheap by computing features once at export time
+
+### Critical points
+
+- Do not train/evaluate with random row split only. Split by demo/match to avoid leakage.
+- If you want live predictions during a round, never use post-round fields (e.g. winner, explode, defuse) as model inputs.
+- Keep rules deterministic and versioned so output comparisons stay stable between releases.
+- Re-export JSON after script updates; old JSON files do not include new analysis keys.
 
 ## Optional Map Image
 

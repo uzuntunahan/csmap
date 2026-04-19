@@ -184,6 +184,310 @@ def has_cols(df: pl.DataFrame | None, cols: list[str]) -> bool:
     return all(c in df.columns for c in cols)
 
 
+def normalize_side(value: Any) -> str | None:
+    s = str(value or "").strip().lower()
+    if s in {"ct", "counter-terrorist", "counter_terrorist", "counterterrorist"}:
+        return "ct"
+    if s in {"t", "terrorist", "terrorists"}:
+        return "t"
+    if "counter" in s or s.startswith("ct"):
+        return "ct"
+    if "terror" in s or s == "t-side":
+        return "t"
+    return None
+
+
+def first_non_missing(row: dict[str, Any], keys: list[str]) -> Any:
+    for key in keys:
+        if key in row and not is_missing(row.get(key)):
+            return row.get(key)
+    return None
+
+
+def side_from_row(row: dict[str, Any], keys: list[str]) -> str | None:
+    return normalize_side(first_non_missing(row, keys))
+
+
+def categorize_weapon(weapon: Any) -> str:
+    w = str(weapon or "").lower().replace("weapon_", "")
+    if not w:
+        return "unknown"
+    if "awp" in w or "ssg08" in w or "scar20" in w or "g3sg1" in w:
+        return "sniper"
+    if "ak47" in w or "m4" in w or "famas" in w or "galil" in w or "aug" in w or "sg553" in w:
+        return "rifle"
+    if "deagle" in w or "usp" in w or "glock" in w or "p250" in w or "five" in w or "cz75" in w:
+        return "pistol"
+    if "nova" in w or "xm1014" in w or "mag7" in w or "sawedoff" in w:
+        return "shotgun"
+    if "mp" in w or "p90" in w or "bizon" in w or "ump" in w or "mac10" in w:
+        return "smg"
+    if "m249" in w or "negev" in w:
+        return "lmg"
+    return "other"
+
+
+def make_round_features(
+    rounds_df: pl.DataFrame | None,
+    ticks_df: pl.DataFrame | None,
+    kills_df: pl.DataFrame | None,
+    bomb_df: pl.DataFrame | None,
+    grenades_df: pl.DataFrame | None,
+) -> list[dict[str, Any]]:
+    if rounds_df is None or rounds_df.is_empty():
+        return []
+
+    round_rows = rounds_df.to_dicts()
+    all_ticks = [] if ticks_df is None or ticks_df.is_empty() else ticks_df.to_dicts()
+    all_kills = [] if kills_df is None or kills_df.is_empty() else kills_df.to_dicts()
+    all_bomb = [] if bomb_df is None or bomb_df.is_empty() else bomb_df.to_dicts()
+    all_grenades = [] if grenades_df is None or grenades_df.is_empty() else grenades_df.to_dicts()
+
+    features: list[dict[str, Any]] = []
+
+    for r in round_rows:
+        rnum = r.get("round_num")
+        freeze_end = int(r.get("freeze_end") or 0)
+        round_end = int(r.get("end") or freeze_end)
+
+        round_kills = sorted(
+            [k for k in all_kills if k.get("round_num") == rnum],
+            key=lambda x: x.get("tick") or 0,
+        )
+        round_bomb = sorted(
+            [b for b in all_bomb if b.get("round_num") == rnum],
+            key=lambda x: x.get("tick") or 0,
+        )
+        round_grenades = [g for g in all_grenades if g.get("round_num") == rnum]
+        round_ticks = [
+            t for t in all_ticks
+            if t.get("round_num") == rnum and (t.get("tick") or 0) >= freeze_end and (t.get("tick") or 0) <= round_end
+        ]
+
+        # Entry and trade signals.
+        first_kill = round_kills[0] if round_kills else None
+        first_kill_team = (
+            side_from_row(first_kill, ["attacker_team_name", "attacker_side", "attacker_team"])
+            if first_kill else None
+        )
+        first_kill_tick = int(first_kill.get("tick") or 0) if first_kill else None
+        first_kill_offset = (first_kill_tick - freeze_end) if first_kill_tick is not None else None
+        first_kill_headshot = bool(first_kill.get("is_headshot") or first_kill.get("headshot")) if first_kill else False
+        first_kill_weapon_bucket = categorize_weapon(first_kill.get("weapon") if first_kill else None)
+
+        first_trade_happened = False
+        first_trade_delay_ticks = None
+        if first_kill:
+            victim_sid = first_kill.get("victim_steamid")
+            entry_tick = int(first_kill.get("tick") or 0)
+            trade_window_end = entry_tick + 8 * 64
+            for k in round_kills[1:]:
+                ktick = int(k.get("tick") or 0)
+                if ktick > trade_window_end:
+                    break
+                if victim_sid is not None and k.get("attacker_steamid") == victim_sid:
+                    first_trade_happened = True
+                    first_trade_delay_ticks = ktick - entry_tick
+                    break
+
+        # Kill split by side.
+        kills_ct = 0
+        kills_t = 0
+        for k in round_kills:
+            atk_side = side_from_row(k, ["attacker_team_name", "attacker_side", "attacker_team"])
+            if atk_side == "ct":
+                kills_ct += 1
+            elif atk_side == "t":
+                kills_t += 1
+
+        # Utility usage split by thrower side.
+        util_counts = {
+            "ct_smokes": 0,
+            "t_smokes": 0,
+            "ct_flashes": 0,
+            "t_flashes": 0,
+            "ct_molotovs": 0,
+            "t_molotovs": 0,
+        }
+        for g in round_grenades:
+            gtype = str(g.get("grenade_type") or "").lower()
+            thrower_side = side_from_row(g, ["thrower_team_name", "thrower_side", "team_name", "side"])
+            if thrower_side not in {"ct", "t"}:
+                continue
+            key_prefix = "ct" if thrower_side == "ct" else "t"
+            if gtype == "smoke":
+                util_counts[f"{key_prefix}_smokes"] += 1
+            elif gtype == "flashbang":
+                util_counts[f"{key_prefix}_flashes"] += 1
+            elif gtype in {"molotov", "incgrenade"}:
+                util_counts[f"{key_prefix}_molotovs"] += 1
+
+        # Bomb timeline signals.
+        plants = [b for b in round_bomb if str(b.get("event") or "").lower() == "plant"]
+        defuses = [b for b in round_bomb if str(b.get("event") or "").lower() == "defuse"]
+        explodes = [b for b in round_bomb if str(b.get("event") or "").lower() == "explode"]
+        plant_event = plants[-1] if plants else None
+        plant_tick = int(plant_event.get("tick") or 0) if plant_event else None
+        plant_site = str(plant_event.get("bombsite") or "") if plant_event else ""
+        post_plant_ticks = (round_end - plant_tick) if plant_tick is not None else None
+
+        # Economy at round start (first observed row per player after freeze_end).
+        first_tick_by_player: dict[str, dict[str, Any]] = {}
+        for t in sorted(round_ticks, key=lambda x: x.get("tick") or 0):
+            sid = t.get("steamid")
+            if sid is None:
+                continue
+            sid_key = str(sid)
+            if sid_key not in first_tick_by_player:
+                first_tick_by_player[sid_key] = t
+
+        ct_cash_vals: list[float] = []
+        t_cash_vals: list[float] = []
+        ct_equip_vals: list[float] = []
+        t_equip_vals: list[float] = []
+        for row in first_tick_by_player.values():
+            side = side_from_row(row, ["team_name", "side"])
+            if side not in {"ct", "t"}:
+                continue
+            cash = row.get("cash")
+            equip = row.get("current_equip_value")
+            if side == "ct":
+                if not is_missing(cash):
+                    ct_cash_vals.append(float(cash))
+                if not is_missing(equip):
+                    ct_equip_vals.append(float(equip))
+            else:
+                if not is_missing(cash):
+                    t_cash_vals.append(float(cash))
+                if not is_missing(equip):
+                    t_equip_vals.append(float(equip))
+
+        def avg_or_none(values: list[float]) -> float | None:
+            return round(sum(values) / len(values), 2) if values else None
+
+        features.append({
+            "round_num": rnum,
+            "winner": normalize_side(r.get("winner")) or str(r.get("winner") or "").lower(),
+            "reason": str(r.get("reason") or ""),
+            "duration_ticks": max(0, round_end - freeze_end),
+            "first_kill_team": first_kill_team,
+            "first_kill_tick_offset": first_kill_offset,
+            "first_kill_headshot": first_kill_headshot,
+            "first_kill_weapon_bucket": first_kill_weapon_bucket,
+            "first_trade_happened": first_trade_happened,
+            "first_trade_delay_ticks": first_trade_delay_ticks,
+            "kills_ct": kills_ct,
+            "kills_t": kills_t,
+            "ct_smokes": util_counts["ct_smokes"],
+            "t_smokes": util_counts["t_smokes"],
+            "ct_flashes": util_counts["ct_flashes"],
+            "t_flashes": util_counts["t_flashes"],
+            "ct_molotovs": util_counts["ct_molotovs"],
+            "t_molotovs": util_counts["t_molotovs"],
+            "plant_happened": plant_event is not None,
+            "plant_site": plant_site,
+            "plant_tick_offset": (plant_tick - freeze_end) if plant_tick is not None else None,
+            "defused": len(defuses) > 0,
+            "exploded": len(explodes) > 0,
+            "post_plant_ticks": post_plant_ticks,
+            "ct_avg_cash_start": avg_or_none(ct_cash_vals),
+            "t_avg_cash_start": avg_or_none(t_cash_vals),
+            "ct_avg_equip_start": avg_or_none(ct_equip_vals),
+            "t_avg_equip_start": avg_or_none(t_equip_vals),
+        })
+
+    return features
+
+
+def make_round_rule_analysis(round_features: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    analyses: list[dict[str, Any]] = []
+
+    for f in round_features:
+        winner = normalize_side(f.get("winner"))
+        entry = normalize_side(f.get("first_kill_team"))
+        reason = str(f.get("reason") or "").lower()
+        rules: list[dict[str, str]] = []
+
+        def add_rule(
+            code: str,
+            severity: str,
+            text: str,
+            side: str = "ct_t",
+            judgement: str = "neutral",
+        ) -> None:
+            normalized_side = side if side in {"ct", "t", "ct_t"} else "ct_t"
+            side_label = "CT" if normalized_side == "ct" else "T" if normalized_side == "t" else "CT-T"
+            normalized_judgement = judgement if judgement in {"good", "fault", "neutral"} else "neutral"
+            rules.append({
+                "code": code,
+                "severity": severity,
+                "side": normalized_side,
+                "judgement": normalized_judgement,
+                "text": f"[{side_label}] {text}",
+            })
+
+        if entry in {"ct", "t"} and winner in {"ct", "t"}:
+            if entry == winner:
+                add_rule("R001", "info", "Entry kill alan taraf roundu kapatti (entry conversion pozitif).", side=entry, judgement="good")
+            else:
+                add_rule("R002", "high", "Entry kill avantaji rounda tasinamadi (conversion zayif).", side=entry, judgement="fault")
+
+        if f.get("first_trade_happened") is True:
+            delay = f.get("first_trade_delay_ticks")
+            if isinstance(delay, (int, float)) and delay <= 256:
+                add_rule("R003", "info", "Hizli trade var; spacing ve destek koordinasyonu iyi.", side=entry or "ct_t", judgement="good")
+            else:
+                add_rule("R004", "medium", "Trade gec geldi; ilk temas sonrasi alan kontrolu zayiflayabilir.", side=entry or "ct_t", judgement="fault")
+        elif entry in {"ct", "t"}:
+            add_rule("R005", "medium", "Entry sonrasi hizli trade yok; 5v4 avantaj korunmaliydi.", side=entry, judgement="fault")
+
+        if f.get("plant_happened") is True:
+            plant_offset = f.get("plant_tick_offset")
+            post_plant = f.get("post_plant_ticks")
+            if isinstance(plant_offset, (int, float)) and plant_offset > 1200:
+                add_rule("R006", "medium", "Plant gec geldi; execute zamani sikisti.", side="t", judgement="fault")
+            if winner == "t" and isinstance(post_plant, (int, float)) and post_plant >= 320:
+                add_rule("R007", "info", "Post-plant suresi yeterli; afterplant disiplinli oynanmis.", side="t", judgement="good")
+            if winner == "ct" and isinstance(post_plant, (int, float)) and post_plant <= 320:
+                add_rule("R008", "high", "Plant sonrasi hizli kayip var; post-plant pozisyonlari kirilgan.", side="t", judgement="fault")
+        else:
+            if winner == "ct":
+                add_rule("R009", "info", "Plant engellenmis; round kontrolu CT tarafinda kalmis.", side="ct", judgement="good")
+
+        ct_utility = (f.get("ct_smokes") or 0) + (f.get("ct_flashes") or 0) + (f.get("ct_molotovs") or 0)
+        t_utility = (f.get("t_smokes") or 0) + (f.get("t_flashes") or 0) + (f.get("t_molotovs") or 0)
+        if ct_utility - t_utility >= 3:
+            add_rule("R010", "info", "CT utility temposu ustun; alan yavaslatma basarili.", side="ct", judgement="good")
+        elif t_utility - ct_utility >= 3:
+            add_rule("R011", "info", "T utility temposu ustun; execute hazirligi guclu.", side="t", judgement="good")
+
+        ct_cash = f.get("ct_avg_cash_start")
+        t_cash = f.get("t_avg_cash_start")
+        if isinstance(ct_cash, (int, float)) and isinstance(t_cash, (int, float)):
+            if ct_cash - t_cash >= 1500 and winner == "t":
+                add_rule("R012", "high", "Ekonomi avantaji CT tarafinda olmasina ragmen round kaybedildi.", side="ct", judgement="fault")
+            if t_cash - ct_cash >= 1500 and winner == "ct":
+                add_rule("R013", "high", "Ekonomi avantaji T tarafinda olmasina ragmen round kaybedildi.", side="t", judgement="fault")
+
+        if reason == "explode":
+            add_rule("R014", "medium", "Bomb explode: retake gec kalmis veya utility yetersiz kalmis olabilir.", side="ct", judgement="fault")
+        if reason == "defuse":
+            add_rule("R015", "info", "Defuse roundu: retake zamanlamasi ve trade zinciri calismis.", side="ct", judgement="good")
+
+        if not rules:
+            add_rule("R000", "info", "Bu round icin belirgin bir kritik sinyal yakalanmadi.", side="ct_t", judgement="neutral")
+
+        score = sum(3 if r["severity"] == "high" else 2 if r["severity"] == "medium" else 1 for r in rules)
+        analyses.append({
+            "round_num": f.get("round_num"),
+            "score": score,
+            "summary": f"Round {f.get('round_num')}: {len(rules)} sinyal uretildi.",
+            "rules": rules,
+        })
+
+    return analyses
+
+
 def make_player_kills(kills_df: pl.DataFrame | None) -> list[dict[str, Any]]:
     if kills_df is None or kills_df.is_empty() or "attacker_steamid" not in kills_df.columns:
         return []
@@ -340,6 +644,8 @@ def build_export(demo: Demo, args: argparse.Namespace) -> dict[str, Any]:
     grenade_landings = make_grenade_landings(demo.grenades)
     player_kills = make_player_kills(demo.kills)
     player_stats = make_player_stats(demo.kills)
+    round_features = make_round_features(demo.rounds, demo.ticks, demo.kills, demo.bomb, demo.grenades)
+    round_rule_analysis = make_round_rule_analysis(round_features)
     map_name = demo.header.get("map_name", "unknown")
     map_bounds = compute_map_bounds(demo.ticks)
     map_image = detect_map_image(map_name)
@@ -371,6 +677,8 @@ def build_export(demo: Demo, args: argparse.Namespace) -> dict[str, Any]:
         "grenade_landings": [{k: safe_value(v) for k, v in row.items()} for row in grenade_landings],
         "player_kills": [{k: safe_value(v) for k, v in row.items()} for row in player_kills],
         "player_stats": [{k: safe_value(v) for k, v in row.items()} for row in player_stats],
+        "round_features": [{k: safe_value(v) for k, v in row.items()} for row in round_features],
+        "round_rule_analysis": [{k: safe_value(v) for k, v in row.items()} for row in round_rule_analysis],
     }
 
 
@@ -411,6 +719,8 @@ def main() -> None:
         "grenade_landings",
         "player_kills",
         "player_stats",
+        "round_features",
+        "round_rule_analysis",
     ]:
         print(f"  {key:<17} {len(payload.get(key, [])):,}")
 
