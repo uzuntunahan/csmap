@@ -407,6 +407,16 @@ def make_round_rule_analysis(round_features: list[dict[str, Any]]) -> list[dict[
         entry = normalize_side(f.get("first_kill_team"))
         reason = str(f.get("reason") or "").lower()
         rules: list[dict[str, str]] = []
+        duration_ticks = int(f.get("duration_ticks") or 0)
+        first_kill_offset = f.get("first_kill_tick_offset")
+        ct_smokes = int(f.get("ct_smokes") or 0)
+        t_smokes = int(f.get("t_smokes") or 0)
+        ct_flashes = int(f.get("ct_flashes") or 0)
+        t_flashes = int(f.get("t_flashes") or 0)
+        ct_molotovs = int(f.get("ct_molotovs") or 0)
+        t_molotovs = int(f.get("t_molotovs") or 0)
+        kills_ct = int(f.get("kills_ct") or 0)
+        kills_t = int(f.get("kills_t") or 0)
 
         def add_rule(
             code: str,
@@ -454,8 +464,8 @@ def make_round_rule_analysis(round_features: list[dict[str, Any]]) -> list[dict[
             if winner == "ct":
                 add_rule("R009", "info", "Plant engellenmis; round kontrolu CT tarafinda kalmis.", side="ct", judgement="good")
 
-        ct_utility = (f.get("ct_smokes") or 0) + (f.get("ct_flashes") or 0) + (f.get("ct_molotovs") or 0)
-        t_utility = (f.get("t_smokes") or 0) + (f.get("t_flashes") or 0) + (f.get("t_molotovs") or 0)
+        ct_utility = ct_smokes + ct_flashes + ct_molotovs
+        t_utility = t_smokes + t_flashes + t_molotovs
         if ct_utility - t_utility >= 3:
             add_rule("R010", "info", "CT utility temposu ustun; alan yavaslatma basarili.", side="ct", judgement="good")
         elif t_utility - ct_utility >= 3:
@@ -473,6 +483,53 @@ def make_round_rule_analysis(round_features: list[dict[str, Any]]) -> list[dict[
             add_rule("R014", "medium", "Bomb explode: retake gec kalmis veya utility yetersiz kalmis olabilir.", side="ct", judgement="fault")
         if reason == "defuse":
             add_rule("R015", "info", "Defuse roundu: retake zamanlamasi ve trade zinciri calismis.", side="ct", judgement="good")
+
+        # R016-R030: extended pace/execute/upset rules.
+        if isinstance(first_kill_offset, (int, float)) and first_kill_offset >= 45 * 64:
+            add_rule("R016", "medium", "Ilk temas gec geldi; tempo dusuk ve bilgi oyunu agir basmis.", side="ct_t", judgement="neutral")
+
+        if isinstance(first_kill_offset, (int, float)) and first_kill_offset <= 12 * 64 and entry in {"ct", "t"}:
+            if winner == entry:
+                add_rule("R017", "info", "Erken temas avantaji hizli sekilde skora cevrildi.", side=entry, judgement="good")
+            elif winner in {"ct", "t"}:
+                add_rule("R018", "medium", "Erken agresyon avantaji korunamadi; tempo kontrolu kaybedildi.", side=entry, judgement="fault")
+
+        if f.get("plant_happened") is True and t_smokes == 0:
+            add_rule("R019", "high", "Plant roundunda T smoke kullanimi yok; execute katmani eksik.", side="t", judgement="fault")
+
+        if f.get("plant_happened") is True and (t_smokes + t_molotovs) < 2:
+            add_rule("R020", "medium", "Plant oncesi alan acma utilitysi zayif; post-plant kirilganligi artmis olabilir.", side="t", judgement="fault")
+
+        if reason == "defuse" and ct_utility < 2:
+            add_rule("R021", "info", "Dusuk utility ile defuse alindi; CT retake bireysel karar kalitesi yuksek.", side="ct", judgement="good")
+
+        if reason == "explode" and ct_utility >= (t_utility + 3):
+            add_rule("R022", "high", "CT utility ustunlugune ragmen bomb explode; utility degeri skora donusmedi.", side="ct", judgement="fault")
+
+        if winner == "t" and kills_t >= 5 and duration_ticks <= 25 * 64:
+            add_rule("R023", "info", "Hizli T roundu: execute temiz ve round kapanisi hizli.", side="t", judgement="good")
+
+        if winner == "ct" and not f.get("plant_happened") and duration_ticks <= 22 * 64:
+            add_rule("R024", "info", "Plant verilmeden erken CT kapanisi; map kontrolu guclu.", side="ct", judgement="good")
+
+        if isinstance(ct_cash, (int, float)) and isinstance(t_cash, (int, float)):
+            if ct_cash >= (t_cash + 1500) and winner == "t":
+                add_rule("R025", "info", "T tarafi ekonomik dezavantajdan round cikardi (upset win).", side="t", judgement="good")
+            if t_cash >= (ct_cash + 1500) and winner == "ct":
+                add_rule("R026", "info", "CT tarafi ekonomik dezavantajdan round cikardi (upset win).", side="ct", judgement="good")
+
+        post_plant = f.get("post_plant_ticks")
+        if f.get("plant_happened") is True and isinstance(post_plant, (int, float)):
+            if winner == "ct" and post_plant <= 160:
+                add_rule("R027", "high", "Plant sonrasi cok hizli dusus; T afterplant setup dagilmis.", side="t", judgement="fault")
+            if winner == "ct" and post_plant >= 700:
+                add_rule("R028", "info", "Uzun post-plant savasi sonunda CT roundu aldi; retake sabri guclu.", side="ct", judgement="good")
+
+        if (ct_flashes + t_flashes) == 0 and duration_ticks >= 40 * 64:
+            add_rule("R029", "medium", "Uzun rounda ragmen flash kullanimi yok; bilgi ve giris senkronu sinirli kalmis olabilir.", side="ct_t", judgement="fault")
+
+        if abs(ct_utility - t_utility) <= 1 and winner in {"ct", "t"}:
+            add_rule("R030", "info", "Utility dengesi yakin; round sonucu daha cok duel ve pozisyon kalitesiyle belirlenmis.", side="ct_t", judgement="neutral")
 
         if not rules:
             add_rule("R000", "info", "Bu round icin belirgin bir kritik sinyal yakalanmadi.", side="ct_t", judgement="neutral")
@@ -572,6 +629,246 @@ def make_player_stats(kills_df: pl.DataFrame | None) -> list[dict[str, Any]]:
     return rows
 
 
+def make_round_player_analysis(
+    rounds_df: pl.DataFrame | None,
+    ticks_df: pl.DataFrame | None,
+    kills_df: pl.DataFrame | None,
+) -> list[dict[str, Any]]:
+    if rounds_df is None or rounds_df.is_empty():
+        return []
+
+    round_rows = rounds_df.to_dicts()
+    all_ticks = [] if ticks_df is None or ticks_df.is_empty() else ticks_df.to_dicts()
+    all_kills = [] if kills_df is None or kills_df.is_empty() else kills_df.to_dicts()
+    trade_window_ticks = 8 * 64
+    out: list[dict[str, Any]] = []
+
+    for r in round_rows:
+        rnum = r.get("round_num")
+        round_ticks = [t for t in all_ticks if t.get("round_num") == rnum]
+        round_kills = sorted(
+            [k for k in all_kills if k.get("round_num") == rnum],
+            key=lambda x: x.get("tick") or 0,
+        )
+
+        players: dict[str, dict[str, Any]] = {}
+
+        def ensure_player(
+            steamid_value: Any,
+            name_value: Any = None,
+            side_value: Any = None,
+        ) -> dict[str, Any] | None:
+            if steamid_value is None:
+                return None
+            sid = str(steamid_value)
+            if sid not in players:
+                players[sid] = {
+                    "steamid": sid,
+                    "name": name_value or sid,
+                    "side": normalize_side(side_value),
+                    "kills": 0,
+                    "deaths": 0,
+                    "assists": 0,
+                    "entry_kill": 0,
+                    "entry_death": 0,
+                    "trade_kills": 0,
+                    "untraded_deaths": 0,
+                    "multikill": 0,
+                }
+            row = players[sid]
+            if (not row.get("name")) and name_value:
+                row["name"] = name_value
+            if row.get("side") is None:
+                row["side"] = normalize_side(side_value)
+            return row
+
+        # Seed known participants from ticks to avoid missing zero-kill players.
+        for t in round_ticks:
+            ensure_player(t.get("steamid"), t.get("name"), first_non_missing(t, ["team_name", "side"]))
+
+        # Entry kill/death markers.
+        if round_kills:
+            fk = round_kills[0]
+            fk_att = ensure_player(
+                fk.get("attacker_steamid"),
+                fk.get("attacker_name"),
+                first_non_missing(fk, ["attacker_team_name", "attacker_side", "attacker_team"]),
+            )
+            fk_vic = ensure_player(
+                fk.get("victim_steamid"),
+                fk.get("victim_name"),
+                first_non_missing(fk, ["victim_team_name", "victim_side", "victim_team"]),
+            )
+            if fk_att:
+                fk_att["entry_kill"] += 1
+            if fk_vic:
+                fk_vic["entry_death"] += 1
+
+        # Core K/D/A accumulation.
+        for k in round_kills:
+            atk = ensure_player(
+                k.get("attacker_steamid"),
+                k.get("attacker_name"),
+                first_non_missing(k, ["attacker_team_name", "attacker_side", "attacker_team"]),
+            )
+            vic = ensure_player(
+                k.get("victim_steamid"),
+                k.get("victim_name"),
+                first_non_missing(k, ["victim_team_name", "victim_side", "victim_team"]),
+            )
+            ast = ensure_player(
+                k.get("assister_steamid"),
+                k.get("assister_name"),
+                first_non_missing(k, ["assister_team_name", "assister_side", "assister_team"]),
+            )
+
+            if atk is not None:
+                atk["kills"] += 1
+            if vic is not None:
+                vic["deaths"] += 1
+            if ast is not None:
+                ast["assists"] += 1
+
+        # Multi-kill count per player in round.
+        for row in players.values():
+            row["multikill"] = row["kills"]
+
+        # Build death events for trade checks.
+        death_events: list[dict[str, Any]] = []
+        for k in round_kills:
+            vic_sid = k.get("victim_steamid")
+            atk_sid = k.get("attacker_steamid")
+            tick = int(k.get("tick") or 0)
+            vic_side = side_from_row(k, ["victim_team_name", "victim_side", "victim_team"])
+            atk_side = side_from_row(k, ["attacker_team_name", "attacker_side", "attacker_team"])
+            death_events.append({
+                "tick": tick,
+                "victim_sid": str(vic_sid) if vic_sid is not None else None,
+                "attacker_sid": str(atk_sid) if atk_sid is not None else None,
+                "victim_side": vic_side,
+                "attacker_side": atk_side,
+            })
+
+        # Trade kills: attacker avenges recent teammate death by killing that killer.
+        for k in round_kills:
+            atk_sid = k.get("attacker_steamid")
+            vic_sid = k.get("victim_steamid")
+            if atk_sid is None or vic_sid is None:
+                continue
+            atk_key = str(atk_sid)
+            atk_side = side_from_row(k, ["attacker_team_name", "attacker_side", "attacker_team"])
+            ktick = int(k.get("tick") or 0)
+
+            is_trade = False
+            for d in death_events:
+                if d["tick"] >= ktick:
+                    continue
+                if ktick - d["tick"] > trade_window_ticks:
+                    continue
+                if d["victim_side"] != atk_side:
+                    continue
+                if d["attacker_sid"] != str(vic_sid):
+                    continue
+                is_trade = True
+                break
+
+            if is_trade and atk_key in players:
+                players[atk_key]["trade_kills"] += 1
+
+        # Untraded deaths: no same-side revenge on killer within trade window.
+        for d in death_events:
+            victim_sid = d["victim_sid"]
+            attacker_sid = d["attacker_sid"]
+            dside = d["victim_side"]
+            dtick = d["tick"]
+            if victim_sid is None or attacker_sid is None or dside is None:
+                continue
+
+            traded = False
+            for k in round_kills:
+                ktick = int(k.get("tick") or 0)
+                if ktick <= dtick:
+                    continue
+                if ktick - dtick > trade_window_ticks:
+                    break
+                k_att_side = side_from_row(k, ["attacker_team_name", "attacker_side", "attacker_team"])
+                if k_att_side != dside:
+                    continue
+                if str(k.get("victim_steamid")) == attacker_sid:
+                    traded = True
+                    break
+
+            if not traded and victim_sid in players:
+                players[victim_sid]["untraded_deaths"] += 1
+
+        # Score + textual signals.
+        player_rows: list[dict[str, Any]] = []
+        for p in players.values():
+            impact = (
+                p["kills"] * 2.0
+                + p["assists"] * 1.0
+                + p["trade_kills"] * 1.5
+                + p["entry_kill"] * 2.0
+                + max(0, p["multikill"] - 1) * 1.5
+            )
+            fault = (
+                p["deaths"] * 1.0
+                + p["untraded_deaths"] * 2.0
+                + p["entry_death"] * 1.5
+            )
+            net = impact - fault
+
+            judgement = "neutral"
+            if net >= 2.0:
+                judgement = "good"
+            elif net <= -2.0:
+                judgement = "fault"
+
+            signals: list[str] = []
+            if p["entry_kill"] > 0:
+                signals.append("Entry kill aldi")
+            if p["entry_death"] > 0:
+                signals.append("Entry duel kaybi")
+            if p["trade_kills"] > 0:
+                signals.append(f"Trade kill x{p['trade_kills']}")
+            if p["untraded_deaths"] > 0:
+                signals.append(f"Untraded death x{p['untraded_deaths']}")
+            if p["kills"] >= 2:
+                signals.append(f"Multi-kill x{p['kills']}")
+
+            player_rows.append({
+                "steamid": p["steamid"],
+                "name": p["name"],
+                "side": p.get("side") or "ct_t",
+                "kills": p["kills"],
+                "deaths": p["deaths"],
+                "assists": p["assists"],
+                "impact_score": round(impact, 2),
+                "fault_score": round(fault, 2),
+                "net_score": round(net, 2),
+                "judgement": judgement,
+                "signals": signals[:5],
+            })
+
+        player_rows.sort(key=lambda x: x["net_score"], reverse=True)
+
+        top_impact = player_rows[0] if player_rows else None
+        top_fault = None
+        if player_rows:
+            worst = sorted(player_rows, key=lambda x: x["net_score"])[0]
+            if worst["net_score"] < 0:
+                top_fault = worst
+
+        out.append({
+            "round_num": rnum,
+            "top_impact_player": top_impact,
+            "top_fault_player": top_fault,
+            "players": player_rows,
+        })
+
+    return out
+
+
 def make_grenade_landings(grenades_df: pl.DataFrame | None) -> list[dict[str, Any]]:
     if grenades_df is None or grenades_df.is_empty():
         return []
@@ -646,6 +943,7 @@ def build_export(demo: Demo, args: argparse.Namespace) -> dict[str, Any]:
     player_stats = make_player_stats(demo.kills)
     round_features = make_round_features(demo.rounds, demo.ticks, demo.kills, demo.bomb, demo.grenades)
     round_rule_analysis = make_round_rule_analysis(round_features)
+    round_player_analysis = make_round_player_analysis(demo.rounds, demo.ticks, demo.kills)
     map_name = demo.header.get("map_name", "unknown")
     map_bounds = compute_map_bounds(demo.ticks)
     map_image = detect_map_image(map_name)
@@ -679,6 +977,7 @@ def build_export(demo: Demo, args: argparse.Namespace) -> dict[str, Any]:
         "player_stats": [{k: safe_value(v) for k, v in row.items()} for row in player_stats],
         "round_features": [{k: safe_value(v) for k, v in row.items()} for row in round_features],
         "round_rule_analysis": [{k: safe_value(v) for k, v in row.items()} for row in round_rule_analysis],
+        "round_player_analysis": [{k: safe_value(v) for k, v in row.items()} for row in round_player_analysis],
     }
 
 
@@ -721,6 +1020,7 @@ def main() -> None:
         "player_stats",
         "round_features",
         "round_rule_analysis",
+        "round_player_analysis",
     ]:
         print(f"  {key:<17} {len(payload.get(key, [])):,}")
 

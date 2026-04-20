@@ -273,6 +273,46 @@
       padding: 7px 14px 8px;
       border-bottom: 1px solid rgba(255,255,255,.03);
     }
+    .player-summary {
+      padding: 8px 14px;
+      border-bottom: 1px solid rgba(255,255,255,.03);
+      display: grid;
+      gap: 6px;
+    }
+    .player-summary-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 10px;
+      color: var(--text2);
+    }
+    .player-summary-row strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .player-list {
+      border-top: 1px solid rgba(255,255,255,.03);
+    }
+    .player-line {
+      padding: 5px 14px;
+      border-bottom: 1px solid rgba(255,255,255,.03);
+      font-size: 10px;
+      color: var(--text2);
+      line-height: 1.35;
+    }
+    .player-line.good { background: rgba(76, 175, 80, .08); }
+    .player-line.fault { background: rgba(244, 67, 54, .09); }
+    .player-line .name {
+      color: var(--text);
+      font-weight: 600;
+      margin-right: 6px;
+    }
+    .player-line .score {
+      font-family: 'JetBrains Mono', monospace;
+      margin-left: 6px;
+      color: var(--text);
+    }
     .metric-chip {
       border: 1px solid var(--border);
       background: rgba(255,255,255,.03);
@@ -678,6 +718,8 @@
       <div class="legend-item"><div class="legend-dot" style="background:#ff4444"></div>Kill</div>
       <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div>Bomb</div>
       <div class="legend-item"><div class="legend-dot" style="background:#ffe07a"></div>Bomb Route</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#fff6b8"></div>Flash</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#8cff7b"></div>HE</div>
       <div class="legend-item"><div class="legend-dot" style="background:rgba(180,180,200,.8)"></div>Smoke</div>
       <div class="legend-item"><div class="legend-dot" style="background:#ff6622"></div>Molotov</div>
     </div>
@@ -738,10 +780,17 @@ let roundGrenadesByTick = {}; // {tick: [grenade rows]}
 let roundGrenadesByEntity = {}; // {entity_id: [grenade rows sorted by tick]}
 let roundGrenadeLandings = []; // grenade landings for active round
 let roundBombCarrierPath = []; // bomb carrier path for active round
+let roundFlashBlindEvents = []; // [{tick, victim_steamid}] inferred from flashbang damages
+let roundHELandingDelayComp = 0; // tick compensation for delayed HE landing timestamps
+let flashBursts = []; // [{x,y,ttl,maxTtl}]
+let heBursts = []; // [{x,y,ttl,maxTtl,radius}]
+let lastRenderTick = null;
+let lastEffectTick = null; // interpolated tick checkpoint for burst spawning
 let currentMapName = 'unknown';
 let scoreboardExpanded = false;
 let roundFeaturesByNum = {}; // {round_num: feature row}
 let roundRuleAnalysisByNum = {}; // {round_num: analysis row}
+let roundPlayerAnalysisByNum = {}; // {round_num: player-analysis row}
 
 const canvas  = document.getElementById('mapCanvas');
 const ctx     = canvas.getContext('2d');
@@ -759,7 +808,27 @@ let debugTicksPerMs = 0;  // debug: ticks per ms
 let debugTicksToAdv = 0;  // debug: ticks to advance
 let roundAvgTickStep = 1; // avg tick delta between sampled frames (used for speed normalization)
 let renderInterp = 0; // 0..1 interpolation progress to next sampled tick
+let playTickValue = null; // continuous playback tick in world-tick space
 const DEBUG_ENABLED = false;
+const FLASH_EFFECT_TICKS = 64;  // ~1s at 64 tick
+const HE_EFFECT_TICKS = 32;     // short blast effect
+const FLASH_PLAYER_ICON_TICKS = 128; // icon fade time over blinded players
+const HE_BLAST_WORLD_RADIUS = 300;   // approximate CS2 HE blast radius in world units
+const LANDING_MARKER_TICKS = 160; // show nade landing marker briefly, then fade
+const NADE_ICON_SCALE = 1.6; // global icon size multiplier
+
+const NADE_ICON_PATHS = {
+  flashbang: 'icons/nade_icons_flash.png',
+  hegrenade: 'icons/nade_icons_he.png',
+  molotov: 'icons/nade_icons_molly.png',
+  smoke: 'icons/nade_icons_smoke.png',
+};
+const nadeIcons = {
+  flashbang: null,
+  hegrenade: null,
+  molotov: null,
+  smoke: null,
+};
 
 const MAP_ALIGN_DEFAULT = { scale: 1.0, offsetX: 0, offsetY: 0 };
 let mapAlign = { ...MAP_ALIGN_DEFAULT };
@@ -870,6 +939,7 @@ if (!DEBUG_ENABLED) {
   if (debugPanel) debugPanel.style.display = 'none';
 }
 
+loadNadeIcons();
 bindMapAlignControls();
 updateMapAlignUI();
 
@@ -909,6 +979,8 @@ function seekToTick(targetTick) {
   }
 
   tickIdx = idx;
+  playTickValue = ticksInRound[tickIdx] ?? targetTick;
+  renderInterp = 0;
   programmaticSliderUpdate = true;
   document.getElementById('tickSlider').value = tickIdx;
   programmaticSliderUpdate = false;
@@ -957,6 +1029,87 @@ function loadMapImage(src) {
   };
 
   tryLoad(0);
+}
+
+function loadNadeIcons() {
+  for (const [kind, src] of Object.entries(NADE_ICON_PATHS)) {
+    const img = new Image();
+    img.onload = () => {
+      nadeIcons[kind] = prepareNadeIconImage(img);
+      renderFrame();
+    };
+    img.onerror = () => {
+      // Keep default primitive rendering if icon fails.
+      nadeIcons[kind] = null;
+    };
+    img.src = src;
+  }
+}
+
+function prepareNadeIconImage(img) {
+  // Remove flat corner background color (common in non-transparent PNGs).
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  if (!w || !h) return img;
+
+  const off = document.createElement('canvas');
+  off.width = w;
+  off.height = h;
+  const octx = off.getContext('2d');
+  if (!octx) return img;
+  octx.drawImage(img, 0, 0, w, h);
+
+  let id;
+  try {
+    id = octx.getImageData(0, 0, w, h);
+  } catch {
+    // If image data is blocked for any reason, keep original icon.
+    return img;
+  }
+
+  const d = id.data;
+  const corners = [
+    [0, 0],
+    [w - 1, 0],
+    [0, h - 1],
+    [w - 1, h - 1],
+  ];
+  let br = 0, bg = 0, bb = 0;
+  for (const [cx, cy] of corners) {
+    const p = (cy * w + cx) * 4;
+    br += d[p];
+    bg += d[p + 1];
+    bb += d[p + 2];
+  }
+  br /= corners.length;
+  bg /= corners.length;
+  bb /= corners.length;
+
+  const threshold = 42;
+  for (let i = 0; i < d.length; i += 4) {
+    const dr = d[i] - br;
+    const dg = d[i + 1] - bg;
+    const db = d[i + 2] - bb;
+    const dist = Math.sqrt(dr * dr + dg * dg + db * db);
+    if (dist < threshold) d[i + 3] = 0;
+  }
+
+  octx.putImageData(id, 0, 0);
+  return off;
+}
+
+function drawNadeIcon(kind, x, y, size = 16, alpha = 1) {
+  const img = nadeIcons[kind];
+  if (!img) return false;
+  ctx.save();
+  // Clip as circle so any remaining rectangular background never shows.
+  ctx.beginPath();
+  ctx.arc(x, y, Math.max(2, size * 0.5), 0, Math.PI * 2);
+  ctx.clip();
+  ctx.globalAlpha = Math.max(0, Math.min(alpha, 1));
+  ctx.drawImage(img, x - size / 2, y - size / 2, size, size);
+  ctx.restore();
+  return true;
 }
 
 function getMapImageCandidates(meta = {}) {
@@ -1041,6 +1194,27 @@ function normalizeTeam(teamName) {
 
 function normalizePlayerName(name) {
   return String(name || '').trim().toLowerCase();
+}
+
+function normalizeGrenadeType(value) {
+  const raw = String(value || '').toLowerCase().replace(/^weapon_/, '').replace(/\s+/g, '');
+  const s = raw
+    .replace(/^c/, '')
+    .replace(/projectile/g, '')
+    .replace(/grenade/g, '');
+  if (s === 'flashbang' || s === 'flash') return 'flashbang';
+  if (s === 'hegrenade' || s === 'he' || s === 'frag') return 'hegrenade';
+  if (s === 'smokegrenade' || s === 'smoke') return 'smoke';
+  if (s === 'molotov' || s === 'incgrenade' || s === 'incendiary') return 'molotov';
+  if (s === 'flashbang') return 'flashbang';
+  if (s === 'he') return 'hegrenade';
+  if (s === 'smoke') return 'smoke';
+  if (s === 'incendiary') return 'molotov';
+  if (raw.includes('flash')) return 'flashbang';
+  if (raw.includes('hegrenade') || raw == 'he') return 'hegrenade';
+  if (raw.includes('smoke')) return 'smoke';
+  if (raw.includes('molotov') || raw.includes('incendiary')) return 'molotov';
+  return s || raw;
 }
 
 function buildLiveStats(currentRoundNum, currentTick) {
@@ -1179,8 +1353,9 @@ function buildRoundAnalysis(roundNumber) {
 
   const feat = roundFeaturesByNum[roundNumber];
   const analysis = roundRuleAnalysisByNum[roundNumber];
+  const playerAnalysis = roundPlayerAnalysisByNum[roundNumber];
 
-  if (!feat && !analysis) {
+  if (!feat && !analysis && !playerAnalysis) {
     panel.innerHTML = '<div class="analysis-empty">No round analysis data found. Re-export JSON with algorithmic features enabled.</div>';
     return;
   }
@@ -1199,6 +1374,32 @@ function buildRoundAnalysis(roundNumber) {
   }
   if (metrics.length) {
     lines.push(`<div class="analysis-metrics">${metrics.join('')}</div>`);
+  }
+
+  if (playerAnalysis) {
+    const topImpact = playerAnalysis.top_impact_player;
+    const topFault = playerAnalysis.top_fault_player;
+    const summaryRows = [];
+    if (topImpact) {
+      summaryRows.push(`<div class="player-summary-row"><span>Top Impact</span><strong>${topImpact.name || topImpact.steamid || '-'}</strong><span class="score">Net ${topImpact.net_score ?? '-'}</span></div>`);
+    }
+    if (topFault) {
+      summaryRows.push(`<div class="player-summary-row"><span>Top Fault</span><strong>${topFault.name || topFault.steamid || '-'}</strong><span class="score">Net ${topFault.net_score ?? '-'}</span></div>`);
+    }
+    if (!summaryRows.length) {
+      summaryRows.push('<div class="player-summary-row"><span>Player Signals</span><strong>No clear fault player</strong></div>');
+    }
+    lines.push(`<div class="player-summary">${summaryRows.join('')}</div>`);
+
+    const players = Array.isArray(playerAnalysis.players) ? playerAnalysis.players.slice(0, 5) : [];
+    if (players.length) {
+      const playerLines = players.map(p => {
+        const rowClass = p.judgement === 'good' ? 'good' : p.judgement === 'fault' ? 'fault' : '';
+        const signal = Array.isArray(p.signals) && p.signals.length ? p.signals[0] : 'No strong signal';
+        return `<div class="player-line ${rowClass}"><span class="name">${p.name || p.steamid || '-'}</span>${signal}<span class="score">K/D/A ${p.kills ?? 0}/${p.deaths ?? 0}/${p.assists ?? 0} | Net ${p.net_score ?? 0}</span></div>`;
+      });
+      lines.push(`<div class="player-list">${playerLines.join('')}</div>`);
+    }
   }
 
   const rules = Array.isArray(analysis?.rules) ? analysis.rules : [];
@@ -1245,12 +1446,16 @@ function loadData(data) {
   DATA = data;
   roundFeaturesByNum = {};
   roundRuleAnalysisByNum = {};
+  roundPlayerAnalysisByNum = {};
 
   for (const row of (data.round_features || [])) {
     if (row?.round_num != null) roundFeaturesByNum[row.round_num] = row;
   }
   for (const row of (data.round_rule_analysis || [])) {
     if (row?.round_num != null) roundRuleAnalysisByNum[row.round_num] = row;
+  }
+  for (const row of (data.round_player_analysis || [])) {
+    if (row?.round_num != null) roundPlayerAnalysisByNum[row.round_num] = row;
   }
 
   currentMapName = data?.meta?.map_name || 'unknown';
@@ -1421,6 +1626,33 @@ function goToRound(idx) {
   roundGrenadeLandings = (DATA.grenade_landings || []).filter(g => g.round_num === rNum);
   roundBombCarrierPath = (DATA.bomb_carrier_path || []).filter(p => p.round_num === rNum);
 
+  const roundHEDamageTicks = (DATA.damages || [])
+    .filter(d => d.round_num === rNum && String(d.weapon || '').toLowerCase().includes('he'))
+    .map(d => Number(d.tick))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  const roundHELandingTicks = roundGrenadeLandings
+    .filter(g => normalizeGrenadeType(g.grenade_type) === 'hegrenade')
+    .map(g => Number(g.land_tick))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  roundHELandingDelayComp = estimateHELandingDelayComp(roundHELandingTicks, roundHEDamageTicks);
+
+  roundFlashBlindEvents = (DATA.damages || [])
+    .filter(d => {
+      if (d.round_num !== rNum || d.victim_steamid == null) return false;
+      const w = String(d.weapon || '').toLowerCase();
+      return w === 'flashbang' || w.includes('flash');
+    })
+    .map(d => ({
+      tick: Number(d.tick) || 0,
+      victim_steamid: String(d.victim_steamid),
+      victim_X: d.victim_X,
+      victim_Y: d.victim_Y,
+      intensity: 0.6,
+      duration_ticks: FLASH_PLAYER_ICON_TICKS,
+    }));
+
   roundGrenadesByTick = {};
   roundGrenadesByEntity = {};
   const roundGrenades = DATA.grenades.filter(g => g.round_num === rNum);
@@ -1437,6 +1669,67 @@ function goToRound(idx) {
     roundGrenadesByEntity[eid].sort((a, b) => a.tick - b.tick);
   }
 
+  // Enrich flash blind events with distance-based intensity and duration.
+  const flashLandings = roundGrenadeLandings
+    .filter(g => normalizeGrenadeType(g.grenade_type) === 'flashbang')
+    .map(g => ({
+      tick: Number(g.land_tick),
+      x: g.land_X,
+      y: g.land_Y,
+      entity_id: g.entity_id,
+      raw: g,
+    }))
+    .filter(g => Number.isFinite(g.tick));
+
+  function resolveLandingXYForRound(gl) {
+    if (gl.land_X != null && gl.land_Y != null) return [gl.land_X, gl.land_Y];
+    const rows = roundGrenadesByEntity[gl.entity_id] || [];
+    let best = null;
+    for (const row of rows) {
+      const rowTick = Number(row.tick);
+      if (!Number.isFinite(rowTick) || rowTick > Number(gl.land_tick)) continue;
+      if (row.X == null || row.Y == null) continue;
+      best = row;
+    }
+    if (!best) return [null, null];
+    return [best.X, best.Y];
+  }
+
+  for (const ev of roundFlashBlindEvents) {
+    const evTick = Number(ev.tick);
+    const vx = Number(ev.victim_X);
+    const vy = Number(ev.victim_Y);
+    let nearest = null;
+    let bestDt = Infinity;
+
+    for (const fl of flashLandings) {
+      const dt = Math.abs(fl.tick - evTick);
+      if (dt < bestDt) {
+        bestDt = dt;
+        nearest = fl;
+      }
+    }
+
+    let intensity = 0.6;
+    if (nearest && bestDt <= 80) {
+      let lx = nearest.x;
+      let ly = nearest.y;
+      if (lx == null || ly == null) {
+        const [rx, ry] = resolveLandingXYForRound(nearest.raw);
+        lx = rx;
+        ly = ry;
+      }
+      if (Number.isFinite(vx) && Number.isFinite(vy) && Number.isFinite(lx) && Number.isFinite(ly)) {
+        const dist = Math.hypot(vx - lx, vy - ly);
+        intensity = Math.max(0.2, Math.min(1, 1 - (dist / 1200)));
+      }
+    }
+
+    const durationTicks = Math.round((0.6 + intensity * 2.2) * 64);
+    ev.intensity = intensity;
+    ev.duration_ticks = Math.max(24, durationTicks);
+  }
+
   // Slider
   const slider = document.getElementById('tickSlider');
   slider.min = 0;
@@ -1446,6 +1739,12 @@ function goToRound(idx) {
   document.getElementById('sliderMax').textContent = ticksInRound[ticksInRound.length-1] || 0;
 
   killFlashes = [];
+  flashBursts = [];
+  heBursts = [];
+  playTickValue = ticksInRound[0] ?? null;
+  renderInterp = 0;
+  lastRenderTick = null;
+  lastEffectTick = null;
   lastEventKey = null;
   renderFrame();
 }
@@ -1456,6 +1755,8 @@ document.getElementById('nextRound').addEventListener('click', () => { stopPlay(
 document.getElementById('tickSlider').addEventListener('input', e => {
   if (programmaticSliderUpdate) return;  // Skip if we're updating it programmatically
   tickIdx = parseInt(e.target.value);
+  playTickValue = ticksInRound[tickIdx] ?? playTickValue;
+  renderInterp = 0;
   renderFrame();
 });
 
@@ -1492,44 +1793,62 @@ function animLoop(ts) {
   lastTs = ts;
 
   const speed = parseInt(document.getElementById('speedSelect').value) || 1;
-  const ticksPerMs = (speed * 64) / 1000;  // real CS ticks per ms
-  const indexPerMs = ticksPerMs / Math.max(1, roundAvgTickStep); // sampled index steps per ms
+  const ticksPerMs = (speed * 64) / 1000;  // world ticks per ms
   
   // Debug: store these values
   debugSpeed = speed;
-  debugTicksPerMs = indexPerMs;
-  
-  // Accumulate time
-  accumulatedTime += elapsed;
-  
-  // Calculate sampled-index advance based on real tick speed and sample step.
-  const exactAdvance = accumulatedTime * indexPerMs;
-  const ticksToAdvance = Math.floor(exactAdvance);
-  renderInterp = exactAdvance - ticksToAdvance;
-  debugTicksToAdv = ticksToAdvance;  // debug
-  
-  if (ticksToAdvance > 0) {
-    tickIdx += ticksToAdvance;
-    accumulatedTime -= ticksToAdvance / indexPerMs;  // consume accumulated time
-    
-    // Check if round is over
-    if (tickIdx >= ticksInRound.length) {
-      if (roundIdx + 1 < DATA.rounds.length) {
-        goToRound(roundIdx + 1);
-        accumulatedTime = 0;  // reset for next round
-      } else {
-        tickIdx = ticksInRound.length - 1;
-        stopPlay();
-        renderFrame();
-        updateDebugPanel();  // show final state
-        return;
-      }
-    }
-    
-    programmaticSliderUpdate = true;
-    document.getElementById('tickSlider').value = tickIdx;
-    programmaticSliderUpdate = false;
+  debugTicksPerMs = ticksPerMs;
+
+  if (!ticksInRound.length) {
+    stopPlay();
+    return;
   }
+
+  if (!Number.isFinite(playTickValue)) {
+    playTickValue = ticksInRound[Math.min(tickIdx, ticksInRound.length - 1)] || ticksInRound[0];
+  }
+
+  // Advance in real tick space so variable sample gaps don't delay effects.
+  const tickAdvance = elapsed * ticksPerMs;
+  playTickValue += tickAdvance;
+  debugTicksToAdv = Number.isFinite(tickAdvance) ? Number(tickAdvance.toFixed(2)) : 0;
+
+  const lastTickInRound = ticksInRound[ticksInRound.length - 1];
+  if (playTickValue >= lastTickInRound) {
+    if (roundIdx + 1 < DATA.rounds.length) {
+      goToRound(roundIdx + 1);
+      accumulatedTime = 0;
+      lastTs = ts;
+      animId = requestAnimationFrame(animLoop);
+      return;
+    }
+    playTickValue = lastTickInRound;
+    tickIdx = ticksInRound.length - 1;
+    renderInterp = 0;
+    stopPlay();
+    renderFrame();
+    updateDebugPanel();
+    return;
+  }
+
+  // Binary search: largest sampled tick <= playTickValue.
+  let lo = 0;
+  let hi = ticksInRound.length - 1;
+  while (lo < hi) {
+    const mid = ((lo + hi + 1) >> 1);
+    if (ticksInRound[mid] <= playTickValue) lo = mid;
+    else hi = mid - 1;
+  }
+  tickIdx = lo;
+
+  const curr = ticksInRound[tickIdx];
+  const next = ticksInRound[Math.min(tickIdx + 1, ticksInRound.length - 1)];
+  const denom = next - curr;
+  renderInterp = denom > 0 ? Math.max(0, Math.min((playTickValue - curr) / denom, 1)) : 0;
+
+  programmaticSliderUpdate = true;
+  document.getElementById('tickSlider').value = tickIdx;
+  programmaticSliderUpdate = false;
 
   // Always render so interpolation can smooth motion between sampled ticks.
   renderFrame();
@@ -1550,6 +1869,76 @@ function worldToCanvas(wx, wy) {
   return [cx, cy];
 }
 
+function worldRadiusToCanvas(radiusWorld) {
+  const worldW = Math.max(1, MAP.maxX - MAP.minX);
+  return (Number(radiusWorld) || 0) * (CANVAS_SIZE / worldW);
+}
+
+function hasMeaningfulPathMovement(pathRows, minWorldDistance = 140) {
+  if (!Array.isArray(pathRows) || pathRows.length < 2) return false;
+  let first = null;
+  for (const p of pathRows) {
+    if (p?.X == null || p?.Y == null) continue;
+    if (!first) {
+      first = p;
+      continue;
+    }
+    const dx = Number(p.X) - Number(first.X);
+    const dy = Number(p.Y) - Number(first.Y);
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) continue;
+    if (Math.hypot(dx, dy) >= minWorldDistance) return true;
+  }
+  return false;
+}
+
+function didCrossTick(targetTick, fromTick, toTick) {
+  const t = Number(targetTick);
+  const from = Number(fromTick);
+  const to = Number(toTick);
+  if (!Number.isFinite(t) || !Number.isFinite(from) || !Number.isFinite(to)) return false;
+  if (from === to) return false;
+  if (to > from) return t > from && t <= to;
+  return t < from && t >= to;
+}
+
+function clamp01(v) {
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(0, Math.min(1, v));
+}
+
+function nearestTick(sortedTicks, targetTick) {
+  if (!Array.isArray(sortedTicks) || !sortedTicks.length) return null;
+  let lo = 0;
+  let hi = sortedTicks.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sortedTicks[mid] < targetTick) lo = mid + 1;
+    else hi = mid;
+  }
+  let idx = lo;
+  if (idx > 0) {
+    const left = sortedTicks[idx - 1];
+    const right = sortedTicks[idx];
+    if (Math.abs(left - targetTick) <= Math.abs(right - targetTick)) idx = idx - 1;
+  }
+  return sortedTicks[idx];
+}
+
+function estimateHELandingDelayComp(heLandingTicks, heDamageTicks) {
+  if (!heLandingTicks.length || !heDamageTicks.length) return 0;
+  const deltas = [];
+  for (const lt of heLandingTicks) {
+    const nearest = nearestTick(heDamageTicks, lt);
+    if (!Number.isFinite(nearest)) continue;
+    const delta = lt - nearest;
+    // Typical bad offset observed in this dataset is ~319 ticks (~5s @64 tick).
+    if (delta >= 180 && delta <= 520) deltas.push(delta);
+  }
+  if (deltas.length < 3) return 0;
+  deltas.sort((a, b) => a - b);
+  return Math.round(deltas[Math.floor(deltas.length / 2)]);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  RENDER
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1559,6 +1948,11 @@ function renderFrame() {
   const currentTick = ticksInRound[Math.min(tickIdx, ticksInRound.length - 1)];
   const nextTick = ticksInRound[Math.min(tickIdx + 1, ticksInRound.length - 1)];
   const interpTick = currentTick + (nextTick - currentTick) * renderInterp;
+  const prevTick = (lastRenderTick == null) ? currentTick : lastRenderTick;
+  const loTick = Math.min(prevTick, currentTick);
+  const hiTick = Math.max(prevTick, currentTick);
+  const effectFrom = (lastEffectTick == null) ? interpTick : lastEffectTick;
+  const effectTo = interpTick;
   const rNum = DATA.rounds[roundIdx].round_num;
   const roundStart = DATA.rounds[roundIdx].freeze_end;
   const roundEnd   = DATA.rounds[roundIdx].end;
@@ -1590,7 +1984,53 @@ function renderFrame() {
   const grenadesNow = roundGrenadesByTick[currentTick] || [];
 
   // Grenade landing points in this round
-  const grenadeLandings = roundGrenadeLandings.filter(g => g.land_tick <= currentTick);
+  const grenadeLandings = roundGrenadeLandings.filter(g => {
+    const rawLt = Number(g.land_tick);
+    if (!Number.isFinite(rawLt)) return false;
+    const gt = normalizeGrenadeType(g.grenade_type);
+    const lt = gt === 'hegrenade' ? (rawLt - roundHELandingDelayComp) : rawLt;
+    if (!Number.isFinite(lt)) return false;
+    return lt <= currentTick && (currentTick - lt) <= LANDING_MARKER_TICKS;
+  });
+
+  function resolveLandingXY(gl) {
+    if (gl.land_X != null && gl.land_Y != null) return [gl.land_X, gl.land_Y];
+    const rows = roundGrenadesByEntity[gl.entity_id] || [];
+    let best = null;
+    for (const row of rows) {
+      const rowTick = Number(row.tick);
+      if (!Number.isFinite(rowTick) || rowTick > Number(gl.land_tick)) continue;
+      if (row.X == null || row.Y == null) continue;
+      best = row;
+    }
+    if (!best) return [null, null];
+    return [best.X, best.Y];
+  }
+
+  // Spawn short burst effects when playback crosses a grenade landing tick.
+  for (const gl of roundGrenadeLandings) {
+    const rawLandTick = Number(gl.land_tick);
+    if (!Number.isFinite(rawLandTick)) continue;
+    const gt = normalizeGrenadeType(gl.grenade_type);
+    const landTick = gt === 'hegrenade' ? (rawLandTick - roundHELandingDelayComp) : rawLandTick;
+    if (!Number.isFinite(landTick)) continue;
+    if (!didCrossTick(landTick, effectFrom, effectTo)) continue;
+
+    const [lx, ly] = resolveLandingXY(gl);
+    if (lx == null || ly == null) continue;
+
+    if (gt === 'flashbang') {
+      flashBursts.push({ x: lx, y: ly, ttl: 14, maxTtl: 14 });
+    } else if (gt === 'hegrenade') {
+      heBursts.push({
+        x: lx,
+        y: ly,
+        ttl: 10,
+        maxTtl: 10,
+        radius: worldRadiusToCanvas(HE_BLAST_WORLD_RADIUS),
+      });
+    }
+  }
 
   // Bomb carrier path up to current tick
   const bombCarrierPath = roundBombCarrierPath.filter(p => p.tick <= currentTick);
@@ -1692,10 +2132,14 @@ function renderFrame() {
   for (const sm of activeSmokes) {
     if (sm.X == null || sm.Y == null) continue;
     const [sx, sy] = worldToCanvas(sm.X, sm.Y);
-    const r = 38;
+    const startTick = Number(sm.start_tick);
+    const endTick = Number(sm.end_tick);
+    const hasLifetime = Number.isFinite(startTick) && Number.isFinite(endTick) && endTick > startTick;
+    const lifeFrac = hasLifetime ? Math.max(0, Math.min((endTick - currentTick) / (endTick - startTick), 1)) : 1;
+    const r = 16 + 22 * lifeFrac;
     const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, r);
-    grad.addColorStop(0,   'rgba(200,200,220,0.55)');
-    grad.addColorStop(0.6, 'rgba(180,180,200,0.40)');
+    grad.addColorStop(0,   `rgba(200,200,220,${0.22 + 0.33 * lifeFrac})`);
+    grad.addColorStop(0.6, `rgba(180,180,200,${0.12 + 0.28 * lifeFrac})`);
     grad.addColorStop(1,   'rgba(160,160,180,0.05)');
     ctx.beginPath();
     ctx.arc(sx, sy, r, 0, Math.PI*2);
@@ -1704,24 +2148,93 @@ function renderFrame() {
     ctx.strokeStyle = 'rgba(200,200,220,0.25)';
     ctx.lineWidth = 1;
     ctx.stroke();
+
+    if (hasLifetime) {
+      ctx.beginPath();
+      ctx.arc(sx, sy, r + 3, -Math.PI / 2, -Math.PI / 2 + (Math.PI * 2 * lifeFrac));
+      ctx.strokeStyle = 'rgba(220,220,235,0.55)';
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+    }
+
+    drawNadeIcon('smoke', sx, sy, (13 + 7 * lifeFrac) * NADE_ICON_SCALE, 0.55 + 0.35 * lifeFrac);
   }
 
   // Infernos (molotov)
   for (const inf of activeInfernos) {
     if (inf.X == null || inf.Y == null) continue;
     const [ix, iy] = worldToCanvas(inf.X, inf.Y);
-    const r = 28;
+    const startTick = Number(inf.start_tick);
+    const endTick = Number(inf.end_tick);
+    const hasLifetime = Number.isFinite(startTick) && Number.isFinite(endTick) && endTick > startTick;
+    const lifeFrac = hasLifetime ? Math.max(0, Math.min((endTick - currentTick) / (endTick - startTick), 1)) : 1;
+    const r = 12 + 18 * lifeFrac;
     // Animated flicker
     const flicker = 0.3 + 0.1 * Math.sin(Date.now() / 80);
     const grad = ctx.createRadialGradient(ix, iy, 0, ix, iy, r);
-    grad.addColorStop(0,   `rgba(255,200,50,${0.7 + flicker})`);
-    grad.addColorStop(0.4, `rgba(255,100,20,${0.55 + flicker})`);
+    grad.addColorStop(0,   `rgba(255,200,50,${0.35 + (0.35 * lifeFrac) + flicker * 0.35})`);
+    grad.addColorStop(0.4, `rgba(255,100,20,${0.25 + (0.35 * lifeFrac) + flicker * 0.2})`);
     grad.addColorStop(1,   'rgba(255,60,0,0.02)');
     ctx.beginPath();
     ctx.arc(ix, iy, r, 0, Math.PI*2);
     ctx.fillStyle = grad;
     ctx.fill();
+
+    if (hasLifetime) {
+      ctx.beginPath();
+      ctx.arc(ix, iy, r + 3, -Math.PI / 2, -Math.PI / 2 + (Math.PI * 2 * lifeFrac));
+      ctx.strokeStyle = 'rgba(255,155,80,0.65)';
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+    }
+
+    drawNadeIcon('molotov', ix, iy, (14 + 7 * lifeFrac) * NADE_ICON_SCALE, 0.6 + 0.3 * lifeFrac);
   }
+
+  // Flash short white burst.
+  for (const fb of flashBursts) {
+    const [fx, fy] = worldToCanvas(fb.x, fb.y);
+    const life = 1 - (fb.ttl / Math.max(1, fb.maxTtl));
+    const alpha = fb.ttl / Math.max(1, fb.maxTtl);
+    const r = 8 + life * 10;
+
+    ctx.save();
+    ctx.globalAlpha = 0.85 * alpha;
+    ctx.beginPath();
+    ctx.arc(fx, fy, r, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    drawNadeIcon('flashbang', fx, fy, (16 + 8 * life) * NADE_ICON_SCALE, 0.7 * alpha);
+    ctx.restore();
+  }
+
+  // HE short blast ring (radius-based).
+  for (const hb of heBursts) {
+    const [hx, hy] = worldToCanvas(hb.x, hb.y);
+    const life = 1 - (hb.ttl / Math.max(1, hb.maxTtl));
+    const alpha = hb.ttl / Math.max(1, hb.maxTtl);
+    const r = Math.max(16, hb.radius * (0.72 + 0.28 * life));
+
+    ctx.save();
+    ctx.globalAlpha = 0.75 * alpha;
+    ctx.beginPath();
+    ctx.arc(hx, hy, r, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(130,255,120,0.95)';
+    ctx.lineWidth = 2.4;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(hx, hy, r * 0.35, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(140,255,120,0.28)';
+    ctx.fill();
+    drawNadeIcon('hegrenade', hx, hy, (16 + 8 * life) * NADE_ICON_SCALE, 0.75 * alpha);
+    ctx.restore();
+  }
+
+  // Decay and cleanup burst lists.
+  for (const fb of flashBursts) fb.ttl -= 1;
+  for (const hb of heBursts) hb.ttl -= 1;
+  flashBursts = flashBursts.filter(f => f.ttl > 0);
+  heBursts = heBursts.filter(h => h.ttl > 0);
 
   // Grenade trails (smooth by interpolating tip between sampled ticks)
   const grenadeTrailStart = interpTick - 20;
@@ -1754,11 +2267,18 @@ function renderFrame() {
     if (pts.length < 2) continue;
 
     const gtype = pts[0].grenade_type || prev.grenade_type || 'smoke';
+    const gkind = normalizeGrenadeType(gtype);
+    const first = pts[0];
+    const trailLast = pts[pts.length - 1];
+    const moveDx = Number(trailLast.X) - Number(first.X);
+    const moveDy = Number(trailLast.Y) - Number(first.Y);
+    const isMovingNow = Number.isFinite(moveDx) && Number.isFinite(moveDy) && Math.hypot(moveDx, moveDy) >= 10;
+    if (!isMovingNow) continue;
     let col = 'rgba(150,220,150,0.6)';
-    if (gtype === 'flashbang')  col = 'rgba(255,255,180,0.7)';
-    if (gtype === 'smoke')       col = 'rgba(200,200,230,0.6)';
-    if (gtype === 'molotov' || gtype === 'incgrenade') col = 'rgba(255,120,30,0.7)';
-    if (gtype === 'hegrenade')   col = 'rgba(100,220,100,0.7)';
+    if (gkind === 'flashbang')  col = 'rgba(255,255,180,0.7)';
+    if (gkind === 'smoke')       col = 'rgba(200,200,230,0.6)';
+    if (gkind === 'molotov') col = 'rgba(255,120,30,0.7)';
+    if (gkind === 'hegrenade')   col = 'rgba(100,220,100,0.7)';
     ctx.beginPath();
     const [px0, py0] = worldToCanvas(pts[0].X, pts[0].Y);
     ctx.moveTo(px0, py0);
@@ -1775,37 +2295,60 @@ function renderFrame() {
     const last = pts[pts.length-1];
     const [lx, ly] = worldToCanvas(last.X, last.Y);
     ctx.beginPath();
-    ctx.arc(lx, ly, 4, 0, Math.PI*2);
+    ctx.arc(lx, ly, 6.5, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(10,10,10,0.35)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(lx, ly, 5, 0, Math.PI*2);
     ctx.fillStyle = col;
     ctx.fill();
+
+    // Show grenade type while it is in flight (not only after landing).
+    const iconDrawn = drawNadeIcon(gkind, lx, ly, 15 * NADE_ICON_SCALE, 0.96);
+    if (!iconDrawn) {
+      ctx.beginPath();
+      ctx.arc(lx, ly, 3.5, 0, Math.PI*2);
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+    }
   }
 
   // Grenade landing markers
   for (const gl of grenadeLandings) {
     if (gl.land_X == null || gl.land_Y == null) continue;
     const [gx, gy] = worldToCanvas(gl.land_X, gl.land_Y);
-    const gtype = gl.grenade_type || 'grenade';
+    const gtype = normalizeGrenadeType(gl.grenade_type || 'grenade');
+    const rawTick = Number(gl.land_tick || currentTick);
+    const markerTick = gtype === 'hegrenade' ? (rawTick - roundHELandingDelayComp) : rawTick;
+    const markerAge = Math.max(0, currentTick - markerTick);
+    const markerAlpha = Math.max(0.2, 1 - (markerAge / LANDING_MARKER_TICKS));
     let col = '#99e2b4';
     if (gtype === 'flashbang') col = '#fff5a6';
     if (gtype === 'smoke') col = '#bfc6d1';
-    if (gtype === 'molotov' || gtype === 'incgrenade') col = '#ff7f3f';
+    if (gtype === 'molotov') col = '#ff7f3f';
     if (gtype === 'hegrenade') col = '#73d673';
 
     ctx.beginPath();
-    ctx.arc(gx, gy, 6, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.arc(gx, gy, 9, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(0,0,0,${0.15 + 0.28 * markerAlpha})`;
     ctx.fill();
     ctx.beginPath();
-    ctx.arc(gx, gy, 4, 0, Math.PI * 2);
+    ctx.arc(gx, gy, 6.5, 0, Math.PI * 2);
     ctx.fillStyle = col;
     ctx.fill();
     ctx.strokeStyle = '#111';
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1.4;
     ctx.stroke();
+
+    const iconKind = gtype === 'flashbang' ? 'flashbang' :
+      gtype === 'hegrenade' ? 'hegrenade' :
+      gtype === 'molotov' ? 'molotov' :
+      gtype === 'smoke' ? 'smoke' : null;
+    if (iconKind) drawNadeIcon(iconKind, gx, gy, 16 * NADE_ICON_SCALE, markerAlpha);
   }
 
-  // Bomb carrier route
-  if (bombCarrierPath.length > 1) {
+  // Bomb carrier route (hide static start marker until carrier actually moves)
+  if (bombCarrierPath.length > 1 && hasMeaningfulPathMovement(bombCarrierPath)) {
     ctx.beginPath();
     const [sx, sy] = worldToCanvas(bombCarrierPath[0].X, bombCarrierPath[0].Y);
     ctx.moveTo(sx, sy);
@@ -1872,7 +2415,9 @@ function renderFrame() {
   if (bombState) {
     const bInRound = bombEvents;
     const lastBomb = bInRound.length ? bInRound[bInRound.length - 1] : null;
-    if (lastBomb && lastBomb.X != null) {
+    const bombEvent = String(lastBomb?.event || '').toLowerCase();
+    const shouldDrawBombMarker = bombEvent === 'plant' || bombEvent === 'defuse' || bombEvent === 'detonate' || bombEvent === 'explode';
+    if (lastBomb && shouldDrawBombMarker && lastBomb.X != null && lastBomb.Y != null) {
       const [bx, by] = worldToCanvas(lastBomb.X, lastBomb.Y);
       const pulse = 0.3 + 0.2 * Math.sin(Date.now() / 300);
       ctx.beginPath();
@@ -1889,7 +2434,7 @@ function renderFrame() {
       ctx.textBaseline = 'middle';
       const bombChar = lastBomb.event === 'plant' ? 'P' :
                        lastBomb.event === 'defuse' ? 'D' :
-               lastBomb.event === 'explode' ? 'X' : 'C';
+               (lastBomb.event === 'explode' || lastBomb.event === 'detonate') ? 'X' : 'C';
       ctx.fillText(bombChar, bx, by);
       ctx.textAlign = 'left';
       ctx.textBaseline = 'alphabetic';
@@ -1899,6 +2444,26 @@ function renderFrame() {
   // Players
   const playersArr = Object.values(playerSnap);
   const deadInRound = new Set(roundKills.map(k => String(k.victim_steamid)));
+  const blindedPlayers = new Map(); // sid -> blindness state
+  for (const ev of roundFlashBlindEvents) {
+    const duration = Math.max(1, Number(ev.duration_ticks) || FLASH_PLAYER_ICON_TICKS);
+    const dt = currentTick - (Number(ev.tick) || 0);
+    if (dt < 0 || dt > duration) continue;
+    const remainFrac = 1 - (dt / duration);
+    const intensity = clamp01(Number(ev.intensity) || 0.6);
+    const strength = remainFrac * intensity;
+    const sid = String(ev.victim_steamid || '');
+    if (!sid) continue;
+    const prev = blindedPlayers.get(sid);
+    if (!prev || strength > prev.strength) {
+      blindedPlayers.set(sid, {
+        strength,
+        remainFrac,
+        intensity,
+        remainTicks: duration - dt,
+      });
+    }
+  }
 
   for (const p of playersArr) {
     if (p.X == null || p.Y == null) continue;
@@ -1975,6 +2540,50 @@ function renderFrame() {
     ctx.textAlign = 'center';
     ctx.strokeText(label, px, py - 16);
     ctx.fillText(label, px, py - 16);
+
+    // Flash-blind timed white ring on player.
+    const blind = blindedPlayers.get(sid);
+    if (blind && blind.strength > 0.01) {
+      ctx.save();
+      const alpha = Math.min(1, 0.2 + blind.strength * 0.95);
+      const ringR = 13 + blind.intensity * 8 + (1 - blind.remainFrac) * 4;
+
+      // Soft white aura
+      ctx.globalAlpha = 0.18 * alpha;
+      ctx.beginPath();
+      ctx.arc(px, py, ringR + 3, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+
+      // Full ring
+      ctx.globalAlpha = alpha;
+      ctx.beginPath();
+      ctx.arc(px, py, ringR, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+      ctx.lineWidth = 2.2;
+      ctx.stroke();
+
+      // Countdown arc (shrinks over time)
+      const sweep = Math.PI * 2 * blind.remainFrac;
+      ctx.beginPath();
+      ctx.arc(px, py, ringR + 2.5, -Math.PI / 2, -Math.PI / 2 + sweep);
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+
+      // Remaining blind time in seconds.
+      ctx.globalAlpha = Math.min(1, 0.35 + blind.strength * 0.8);
+      ctx.font = 'bold 10px JetBrains Mono';
+      ctx.textAlign = 'center';
+      ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+      ctx.lineWidth = 2.6;
+      const secs = (blind.remainTicks / 64).toFixed(1);
+      ctx.strokeText(`${secs}s`, px, py - 20);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(`${secs}s`, px, py - 20);
+      ctx.restore();
+    }
+
     ctx.textAlign = 'left';
 
     ctx.restore();
@@ -1988,7 +2597,7 @@ function renderFrame() {
   updateScoreboard(playerSnap, deadInRound, liveStats);
 
   // If infernos active, keep redrawing for animation
-  if (activeInfernos.length > 0 || killFlashes.length > 0) {
+  if (activeInfernos.length > 0 || killFlashes.length > 0 || flashBursts.length > 0 || heBursts.length > 0) {
     if (!playing) {
       // Request single repaint for animation
       requestAnimationFrame(() => {
@@ -1996,6 +2605,9 @@ function renderFrame() {
       });
     }
   }
+
+  lastRenderTick = currentTick;
+  lastEffectTick = interpTick;
 }
 
 function drawGrid() {
