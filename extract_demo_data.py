@@ -9,25 +9,36 @@ from awpy import Demo
 
 
 BASE_PLAYER_PROPS = [
+    "team_name",
+    "team_clan_name",
     "X",
     "Y",
     "Z",
-    "health",
-    "armor_value",
-    "has_helmet",
-    "has_defuser",
-    "inventory",
-    "current_equip_value",
-    "team_name",
-    "is_alive",
+    "last_place_name",
+    "velocity_X",
+    "velocity_Y",
+    "velocity_Z",
     "pitch",
     "yaw",
-    "active_weapon",
+    "health",
+    "armor_value",
+    "inventory",
+    "current_equip_value",
+    "has_defuser",
+    "has_helmet",
+    "flash_duration",
 ]
 
-EXTRA_PLAYER_PROPS = [
+OPTIONAL_PLAYER_PROPS = [
+    "is_alive",
+    "active_weapon",
     "cash",
     "has_bomb",
+    "flash_max_alpha",
+    "flash_alpha",
+    "blind_duration",
+    "is_blinded",
+    "is_flashed",
 ]
 
 DEFAULT_MAP_CALIBRATION = {
@@ -92,12 +103,29 @@ def safe_value(value: Any) -> Any:
     return value
 
 
+def safe_record_value(field_name: str, value: Any) -> Any:
+    val = safe_value(value)
+    if val is None:
+        return None
+
+    key = str(field_name).lower()
+    if key == "steamid" or key.endswith("_steamid"):
+        if isinstance(val, float) and math.isfinite(val) and val.is_integer():
+            return str(int(val))
+        return str(val)
+    return val
+
+
+def rows_to_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{k: safe_record_value(k, v) for k, v in row.items()} for row in rows]
+
+
 def df_to_records(df: pl.DataFrame | None, sample_every: int = 1) -> list[dict[str, Any]]:
     if df is None or df.is_empty():
         return []
     if sample_every > 1:
         df = df[::sample_every]
-    return [{k: safe_value(v) for k, v in row.items()} for row in df.to_dicts()]
+    return rows_to_records(df.to_dicts())
 
 
 def sample_ticks_preserving_players(ticks_df: pl.DataFrame | None, sample_every: int) -> pl.DataFrame | None:
@@ -911,17 +939,199 @@ def make_bomb_carrier_path(ticks_df: pl.DataFrame | None) -> list[dict[str, Any]
     return carriers.to_dicts()
 
 
-def parse_demo(args: argparse.Namespace) -> Demo:
-    demo = Demo(args.demo_file, verbose=args.verbose)
+def clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
 
-    requested = BASE_PLAYER_PROPS + EXTRA_PLAYER_PROPS
+
+def to_float(value: Any) -> float | None:
+    if is_missing(value):
+        return None
     try:
-        demo.parse(player_props=requested)
-    except Exception as exc:
-        print("Warning: parse with extended props failed, retrying with base props.")
-        print(f"Reason: {exc}")
+        return float(value)
+    except Exception:
+        return None
+
+
+def make_flash_blind_events(ticks_df: pl.DataFrame | None) -> list[dict[str, Any]]:
+    """Build per-player flash blindness intervals from parser tick status.
+
+    AWPy exposes `flash_duration` in default player props. This function converts
+    dense tick-level status into compact interval events to avoid client-side
+    inference from damage/landing heuristics.
+    """
+    if ticks_df is None or ticks_df.is_empty():
+        return []
+
+    cols = set(ticks_df.columns)
+
+    def pick_first(candidates: list[str]) -> str | None:
+        for c in candidates:
+            if c in cols:
+                return c
+        return None
+
+    bool_col = pick_first(["is_blinded", "is_flashed"])
+    duration_col = pick_first(["flash_duration", "blind_duration"])
+    alpha_col = pick_first(["flash_alpha", "flash_max_alpha"])
+
+    if bool_col is None and duration_col is None and alpha_col is None:
+        return []
+
+    needed = [
+        c
+        for c in ["round_num", "tick", "steamid", "name", "X", "Y", bool_col, duration_col, alpha_col]
+        if c is not None and c in cols
+    ]
+    if not {"tick", "steamid"}.issubset(set(needed)):
+        return []
+
+    rows = ticks_df.select(needed).sort(["steamid", "tick"]).to_dicts()
+    if not rows:
+        return []
+
+    events: list[dict[str, Any]] = []
+    states: dict[str, dict[str, Any]] = {}
+
+    def flush_state(sid: str) -> None:
+        st = states.get(sid)
+        if not st or not st.get("active"):
+            return
+
+        start_tick = st.get("start_tick")
+        last_tick = st.get("last_tick")
+        if start_tick is None or last_tick is None:
+            st["active"] = False
+            return
+
+        duration_ticks = max(1, int(last_tick) - int(start_tick) + 1)
+        duration_ticks = min(duration_ticks, 10 * 64)
+        events.append({
+            "round_num": st.get("round_num"),
+            "tick": int(start_tick),
+            "victim_steamid": sid,
+            "victim_name": st.get("name"),
+            "victim_X": st.get("start_X"),
+            "victim_Y": st.get("start_Y"),
+            "intensity": round(float(st.get("max_intensity") or 0.55), 4),
+            "duration_ticks": int(duration_ticks),
+            "source": "parser",
+        })
+        st["active"] = False
+
+    for row in rows:
+        sid_raw = row.get("steamid")
+        if sid_raw is None:
+            continue
+        sid = str(sid_raw)
+
+        tick_val = to_float(row.get("tick"))
+        if tick_val is None:
+            continue
+        tick = int(tick_val)
+
+        state = states.setdefault(
+            sid,
+            {
+                "active": False,
+                "start_tick": None,
+                "last_tick": None,
+                "round_num": None,
+                "start_X": None,
+                "start_Y": None,
+                "name": None,
+                "max_intensity": 0.0,
+            },
+        )
+
+        round_num = row.get("round_num")
+        if state["active"] and state.get("round_num") != round_num:
+            flush_state(sid)
+
+        duration_sec = to_float(row.get(duration_col)) if duration_col else None
+        alpha_val = to_float(row.get(alpha_col)) if alpha_col else None
+        bool_val = bool(row.get(bool_col)) if bool_col is not None and row.get(bool_col) is not None else False
+
+        blinded = False
+        if bool_val:
+            blinded = True
+        if duration_sec is not None and duration_sec > 0.02:
+            blinded = True
+
+        intensity_candidates: list[float] = []
+        if duration_sec is not None:
+            # Typical full white duration is around 2-3 seconds.
+            intensity_candidates.append(clamp01(duration_sec / 2.5))
+        elif alpha_val is not None:
+            alpha_norm = alpha_val / 255.0 if alpha_val > 1.0 else alpha_val
+            intensity_candidates.append(clamp01(alpha_norm))
+        if bool_val and not intensity_candidates:
+            intensity_candidates.append(0.55)
+        intensity = max(intensity_candidates) if intensity_candidates else (0.55 if blinded else 0.0)
+
+        if blinded:
+            if not state["active"]:
+                state.update(
+                    {
+                        "active": True,
+                        "start_tick": tick,
+                        "last_tick": tick,
+                        "round_num": round_num,
+                        "start_X": row.get("X"),
+                        "start_Y": row.get("Y"),
+                        "name": row.get("name"),
+                        "max_intensity": float(intensity),
+                    }
+                )
+            else:
+                state["last_tick"] = tick
+                if state.get("start_X") is None and row.get("X") is not None:
+                    state["start_X"] = row.get("X")
+                if state.get("start_Y") is None and row.get("Y") is not None:
+                    state["start_Y"] = row.get("Y")
+                if row.get("name"):
+                    state["name"] = row.get("name")
+                state["max_intensity"] = max(float(state.get("max_intensity") or 0.0), float(intensity))
+        else:
+            if state["active"]:
+                flush_state(sid)
+
+    for sid in list(states.keys()):
+        if states[sid].get("active"):
+            flush_state(sid)
+
+    events.sort(key=lambda x: (x.get("round_num") or 0, x.get("tick") or 0))
+    return events
+
+
+def parse_demo(args: argparse.Namespace) -> Demo:
+    parse_profiles: list[list[str] | None] = [
+        BASE_PLAYER_PROPS + OPTIONAL_PLAYER_PROPS,
+        BASE_PLAYER_PROPS,
+        None,  # AWPy defaults
+    ]
+
+    last_exc: Exception | None = None
+    used_profile: list[str] | None = None
+    for idx, profile in enumerate(parse_profiles):
         demo = Demo(args.demo_file, verbose=args.verbose)
-        demo.parse(player_props=BASE_PLAYER_PROPS)
+        try:
+            if profile is None:
+                demo.parse()
+            else:
+                demo.parse(player_props=profile)
+            used_profile = profile
+            break
+        except Exception as exc:
+            last_exc = exc
+            profile_name = "default props" if profile is None else f"profile#{idx+1} ({len(profile)} props)"
+            print(f"Warning: parse failed with {profile_name}: {exc}")
+    else:
+        raise RuntimeError(f"Demo parse failed for all prop profiles: {last_exc}")
+
+    if used_profile is None:
+        print("Parsed with AWPy default player props.")
+    else:
+        print(f"Parsed with custom player props ({len(used_profile)} fields).")
 
     return demo
 
@@ -939,6 +1149,7 @@ def build_export(demo: Demo, args: argparse.Namespace) -> dict[str, Any]:
 
     bomb_carrier_path = make_bomb_carrier_path(demo.ticks)
     grenade_landings = make_grenade_landings(demo.grenades)
+    flash_blind_events = make_flash_blind_events(demo.ticks)
     player_kills = make_player_kills(demo.kills)
     player_stats = make_player_stats(demo.kills)
     round_features = make_round_features(demo.rounds, demo.ticks, demo.kills, demo.bomb, demo.grenades)
@@ -961,6 +1172,7 @@ def build_export(demo: Demo, args: argparse.Namespace) -> dict[str, Any]:
             "map_image": map_image,
             "map_calibration": map_calibration,
             "has_bomb_carrier_path": len(bomb_carrier_path) > 0,
+            "has_flash_blind_events": len(flash_blind_events) > 0,
         },
         "rounds": df_to_records(demo.rounds),
         "ticks": df_to_records(ticks_sampled),
@@ -971,13 +1183,14 @@ def build_export(demo: Demo, args: argparse.Namespace) -> dict[str, Any]:
         "smokes": df_to_records(demo.smokes),
         "infernos": df_to_records(demo.infernos),
         "shots": df_to_records(demo.shots),
-        "bomb_carrier_path": [{k: safe_value(v) for k, v in row.items()} for row in bomb_carrier_path],
-        "grenade_landings": [{k: safe_value(v) for k, v in row.items()} for row in grenade_landings],
-        "player_kills": [{k: safe_value(v) for k, v in row.items()} for row in player_kills],
-        "player_stats": [{k: safe_value(v) for k, v in row.items()} for row in player_stats],
-        "round_features": [{k: safe_value(v) for k, v in row.items()} for row in round_features],
-        "round_rule_analysis": [{k: safe_value(v) for k, v in row.items()} for row in round_rule_analysis],
-        "round_player_analysis": [{k: safe_value(v) for k, v in row.items()} for row in round_player_analysis],
+        "bomb_carrier_path": rows_to_records(bomb_carrier_path),
+        "grenade_landings": rows_to_records(grenade_landings),
+        "flash_blind_events": rows_to_records(flash_blind_events),
+        "player_kills": rows_to_records(player_kills),
+        "player_stats": rows_to_records(player_stats),
+        "round_features": rows_to_records(round_features),
+        "round_rule_analysis": rows_to_records(round_rule_analysis),
+        "round_player_analysis": rows_to_records(round_player_analysis),
     }
 
 
@@ -1016,6 +1229,7 @@ def main() -> None:
         "shots",
         "bomb_carrier_path",
         "grenade_landings",
+        "flash_blind_events",
         "player_kills",
         "player_stats",
         "round_features",

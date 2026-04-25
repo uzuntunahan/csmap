@@ -813,9 +813,23 @@ const DEBUG_ENABLED = false;
 const FLASH_EFFECT_TICKS = 64;  // ~1s at 64 tick
 const HE_EFFECT_TICKS = 32;     // short blast effect
 const FLASH_PLAYER_ICON_TICKS = 128; // icon fade time over blinded players
+const FLASH_BLIND_INFER_MAX_DIST = 1400; // infer blindness from flash landing proximity
+const FLASH_BLIND_MIN_INTENSITY = 0.12;
+const FLASH_BLIND_MATCH_TICK_WINDOW = 128; // require nearby flash landing for blind event validation
+const FLASH_BLIND_MAX_VALID_DIST = 1650; // drop blind events too far from any flash landing
+const FLASH_BACKFACE_FLOOR = 0.03; // minimum blind factor when fully turned away
+const FLASH_BACKFACE_EXP = 2.2; // stronger front-facing bias
 const HE_BLAST_WORLD_RADIUS = 300;   // approximate CS2 HE blast radius in world units
 const LANDING_MARKER_TICKS = 160; // show nade landing marker briefly, then fade
 const NADE_ICON_SCALE = 1.6; // global icon size multiplier
+const PLAYER_DROPLET_TIP_LEN = 14.2;
+const PLAYER_DROPLET_BASE = 8.7;
+const PLAYER_DROPLET_WING = 9.3;
+const PLAYER_DROPLET_REAR = 11.8;
+const PLAYER_FOV_INNER_TIP_LEN = 9.5;
+const PLAYER_FOV_INNER_BASE = 3.6;
+const PLAYER_FOV_INNER_WING = 4.7;
+const PLAYER_FOV_INNER_REAR = 6.1;
 
 const NADE_ICON_PATHS = {
   flashbang: 'icons/nade_icons_flash.png',
@@ -1618,6 +1632,25 @@ function goToRound(idx) {
   }
   roundPlayerIds = Object.keys(roundPlayerRows);
 
+  // SteamID normalization map for mixed numeric/string payloads.
+  const roundSidAliases = new Map();
+  for (const sid of roundPlayerIds) {
+    roundSidAliases.set(sid, sid);
+    const n = Number(sid);
+    if (Number.isFinite(n)) roundSidAliases.set(String(n), sid);
+  }
+  function resolveRoundSid(value) {
+    const raw = String(value ?? '');
+    if (!raw) return '';
+    if (roundSidAliases.has(raw)) return roundSidAliases.get(raw);
+    const n = Number(raw);
+    if (Number.isFinite(n)) {
+      const nKey = String(n);
+      if (roundSidAliases.has(nKey)) return roundSidAliases.get(nKey);
+    }
+    return raw;
+  }
+
   // Round-scoped caches to avoid filtering giant arrays every frame.
   roundKillsData = DATA.kills.filter(k => k.round_num === rNum);
   roundSmokesData = DATA.smokes.filter(s => s.round_num === rNum);
@@ -1625,33 +1658,6 @@ function goToRound(idx) {
   roundBombData = DATA.bomb.filter(b => b.round_num === rNum);
   roundGrenadeLandings = (DATA.grenade_landings || []).filter(g => g.round_num === rNum);
   roundBombCarrierPath = (DATA.bomb_carrier_path || []).filter(p => p.round_num === rNum);
-
-  const roundHEDamageTicks = (DATA.damages || [])
-    .filter(d => d.round_num === rNum && String(d.weapon || '').toLowerCase().includes('he'))
-    .map(d => Number(d.tick))
-    .filter(Number.isFinite)
-    .sort((a, b) => a - b);
-  const roundHELandingTicks = roundGrenadeLandings
-    .filter(g => normalizeGrenadeType(g.grenade_type) === 'hegrenade')
-    .map(g => Number(g.land_tick))
-    .filter(Number.isFinite)
-    .sort((a, b) => a - b);
-  roundHELandingDelayComp = estimateHELandingDelayComp(roundHELandingTicks, roundHEDamageTicks);
-
-  roundFlashBlindEvents = (DATA.damages || [])
-    .filter(d => {
-      if (d.round_num !== rNum || d.victim_steamid == null) return false;
-      const w = String(d.weapon || '').toLowerCase();
-      return w === 'flashbang' || w.includes('flash');
-    })
-    .map(d => ({
-      tick: Number(d.tick) || 0,
-      victim_steamid: String(d.victim_steamid),
-      victim_X: d.victim_X,
-      victim_Y: d.victim_Y,
-      intensity: 0.6,
-      duration_ticks: FLASH_PLAYER_ICON_TICKS,
-    }));
 
   roundGrenadesByTick = {};
   roundGrenadesByEntity = {};
@@ -1669,8 +1675,59 @@ function goToRound(idx) {
     roundGrenadesByEntity[eid].sort((a, b) => a.tick - b.tick);
   }
 
-  // Enrich flash blind events with distance-based intensity and duration.
-  const flashLandings = roundGrenadeLandings
+  const roundHEDamageTicks = (DATA.damages || [])
+    .filter(d => d.round_num === rNum && String(d.weapon || '').toLowerCase().includes('he'))
+    .map(d => Number(d.tick))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  const roundHELandingTicks = roundGrenadeLandings
+    .filter(g => normalizeGrenadeType(g.grenade_type) === 'hegrenade')
+    .map(g => Number(g.land_tick))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  roundHELandingDelayComp = estimateHELandingDelayComp(roundHELandingTicks, roundHEDamageTicks);
+
+  const parserRoundBlindEvents = (DATA.flash_blind_events || [])
+    .filter(ev => {
+      const evRound = Number(ev.round_num);
+      if (Number.isFinite(evRound) && evRound === rNum) return true;
+      const tk = Number(ev.tick);
+      return Number.isFinite(tk) && tk >= roundStart && tk <= roundEnd;
+    })
+    .map(ev => ({
+      tick: Number(ev.tick) || 0,
+      victim_steamid: resolveRoundSid(ev.victim_steamid ?? ev.steamid ?? ''),
+      victim_X: ev.victim_X,
+      victim_Y: ev.victim_Y,
+      intensity: Number.isFinite(Number(ev.intensity)) ? Number(ev.intensity) : 0.6,
+      duration_ticks: Math.max(24, Number(ev.duration_ticks) || FLASH_PLAYER_ICON_TICKS),
+      source: String(ev.source || 'parser'),
+    }))
+    .filter(ev => ev.victim_steamid && roundPlayerRows[ev.victim_steamid])
+    .sort((a, b) => Number(a.tick || 0) - Number(b.tick || 0));
+
+  roundFlashBlindEvents = parserRoundBlindEvents;
+
+  if (!roundFlashBlindEvents.length) {
+
+  roundFlashBlindEvents = (DATA.damages || [])
+    .filter(d => {
+      if (d.round_num !== rNum || d.victim_steamid == null) return false;
+      const w = String(d.weapon || '').toLowerCase();
+      return w === 'flashbang' || w.includes('flash');
+    })
+    .map(d => ({
+      tick: Number(d.tick) || 0,
+      victim_steamid: resolveRoundSid(d.victim_steamid),
+      victim_X: d.victim_X,
+      victim_Y: d.victim_Y,
+      intensity: 0.6,
+      duration_ticks: FLASH_PLAYER_ICON_TICKS,
+      source: 'damage',
+    }));
+
+  // Enrich/infer flash blind events with distance-based intensity and duration.
+  const explicitFlashLandings = roundGrenadeLandings
     .filter(g => normalizeGrenadeType(g.grenade_type) === 'flashbang')
     .map(g => ({
       tick: Number(g.land_tick),
@@ -1680,6 +1737,41 @@ function goToRound(idx) {
       raw: g,
     }))
     .filter(g => Number.isFinite(g.tick));
+
+  const derivedFlashLandings = [];
+  for (const [eid, rows] of Object.entries(roundGrenadesByEntity)) {
+    if (!Array.isArray(rows) || !rows.length) continue;
+    const gkind = normalizeGrenadeType(rows[0]?.grenade_type);
+    if (gkind !== 'flashbang') continue;
+
+    let last = null;
+    for (const row of rows) {
+      const tk = Number(row.tick);
+      if (!Number.isFinite(tk)) continue;
+      if (row.X == null || row.Y == null) continue;
+      if (!last || tk > last.tick) {
+        last = {
+          tick: tk,
+          x: row.X,
+          y: row.Y,
+          entity_id: row.entity_id ?? eid,
+          raw: null,
+        };
+      }
+    }
+    if (last) derivedFlashLandings.push(last);
+  }
+
+  const flashLandings = [...explicitFlashLandings];
+  if (derivedFlashLandings.length) {
+    const seen = new Set(explicitFlashLandings.map(fl => String(fl.entity_id ?? '') + ':' + String(fl.tick ?? '')));
+    for (const fl of derivedFlashLandings) {
+      const key = String(fl.entity_id ?? '') + ':' + String(fl.tick ?? '');
+      if (seen.has(key)) continue;
+      flashLandings.push(fl);
+    }
+  }
+  flashLandings.sort((a, b) => Number(a.tick) - Number(b.tick));
 
   function resolveLandingXYForRound(gl) {
     if (gl.land_X != null && gl.land_Y != null) return [gl.land_X, gl.land_Y];
@@ -1695,8 +1787,58 @@ function goToRound(idx) {
     return [best.X, best.Y];
   }
 
+  // Fallback: when explicit flash-damage rows are sparse, infer blindness from flash landings.
+  const inferredBlindEvents = [];
+  for (const fl of flashLandings) {
+    let lx = fl.x;
+    let ly = fl.y;
+    if (lx == null || ly == null) {
+      const [rx, ry] = fl.raw ? resolveLandingXYForRound(fl.raw) : [null, null];
+      lx = rx;
+      ly = ry;
+    }
+    if (!Number.isFinite(lx) || !Number.isFinite(ly)) continue;
+
+    for (const sid of roundPlayerIds) {
+      const row = latestRowAtOrBefore(roundPlayerRows[sid], fl.tick);
+      if (!row || row.X == null || row.Y == null) continue;
+      if (row.is_alive === false) continue;
+
+      const dx = lx - Number(row.X);
+      const dy = ly - Number(row.Y);
+      const dist = Math.hypot(dx, dy);
+      if (!Number.isFinite(dist) || dist > FLASH_BLIND_INFER_MAX_DIST) continue;
+
+      let intensity = Math.max(0, 1 - (dist / FLASH_BLIND_INFER_MAX_DIST));
+      intensity *= getFlashFacingFactor(row, lx, ly);
+
+      if (intensity < FLASH_BLIND_MIN_INTENSITY) continue;
+
+      const durationTicks = Math.round((0.55 + intensity * 2.45) * 64);
+      inferredBlindEvents.push({
+        tick: fl.tick,
+        victim_steamid: String(sid),
+        victim_X: row.X,
+        victim_Y: row.Y,
+        intensity,
+        duration_ticks: Math.max(24, durationTicks),
+        source: 'inferred',
+      });
+    }
+  }
+
+  if (inferredBlindEvents.length) {
+    roundFlashBlindEvents = roundFlashBlindEvents.concat(inferredBlindEvents);
+  }
+
+  const validatedBlindEvents = [];
   for (const ev of roundFlashBlindEvents) {
     const evTick = Number(ev.tick);
+    if (!Number.isFinite(evTick)) continue;
+
+    const sid = String(ev.victim_steamid || '');
+    if (!sid) continue;
+
     const vx = Number(ev.victim_X);
     const vy = Number(ev.victim_Y);
     let nearest = null;
@@ -1710,24 +1852,73 @@ function goToRound(idx) {
       }
     }
 
-    let intensity = 0.6;
-    if (nearest && bestDt <= 80) {
-      let lx = nearest.x;
-      let ly = nearest.y;
-      if (lx == null || ly == null) {
-        const [rx, ry] = resolveLandingXYForRound(nearest.raw);
-        lx = rx;
-        ly = ry;
-      }
-      if (Number.isFinite(vx) && Number.isFinite(vy) && Number.isFinite(lx) && Number.isFinite(ly)) {
-        const dist = Math.hypot(vx - lx, vy - ly);
-        intensity = Math.max(0.2, Math.min(1, 1 - (dist / 1200)));
-      }
+    // If landing data is missing, keep explicit damage-driven events with conservative intensity.
+    if (!nearest) {
+      if (ev.source !== 'damage') continue;
+      const baseIntensity = clamp01(Number(ev.intensity) || 0.55);
+      if (baseIntensity < FLASH_BLIND_MIN_INTENSITY) continue;
+      const baseDuration = Math.round((0.55 + baseIntensity * 2.0) * 64);
+      validatedBlindEvents.push({
+        ...ev,
+        intensity: baseIntensity,
+        duration_ticks: Math.max(24, baseDuration),
+      });
+      continue;
     }
 
-    const durationTicks = Math.round((0.6 + intensity * 2.2) * 64);
-    ev.intensity = intensity;
-    ev.duration_ticks = Math.max(24, durationTicks);
+    if (bestDt > FLASH_BLIND_MATCH_TICK_WINDOW && ev.source !== 'damage') continue;
+
+    let lx = nearest.x;
+    let ly = nearest.y;
+    if (lx == null || ly == null) {
+      const [rx, ry] = nearest.raw ? resolveLandingXYForRound(nearest.raw) : [null, null];
+      lx = rx;
+      ly = ry;
+    }
+    if (!Number.isFinite(lx) || !Number.isFinite(ly)) continue;
+
+    let intensity = Number(ev.intensity) || 0.6;
+    if (Number.isFinite(vx) && Number.isFinite(vy)) {
+      const dist = Math.hypot(vx - lx, vy - ly);
+      if (!Number.isFinite(dist) || dist > FLASH_BLIND_MAX_VALID_DIST) {
+        if (ev.source !== 'damage') continue;
+      }
+      intensity = Math.max(0.05, Math.min(1, 1 - (dist / FLASH_BLIND_INFER_MAX_DIST)));
+    }
+
+    const rowAtTick = latestRowAtOrBefore(roundPlayerRows[sid], evTick);
+    if (rowAtTick) {
+      intensity *= getFlashFacingFactor(rowAtTick, lx, ly);
+    }
+
+    if (intensity < FLASH_BLIND_MIN_INTENSITY) continue;
+
+    const durationTicks = Math.round((0.55 + intensity * 2.35) * 64);
+    validatedBlindEvents.push({
+      ...ev,
+      intensity,
+      duration_ticks: Math.max(24, durationTicks),
+    });
+  }
+  roundFlashBlindEvents = validatedBlindEvents;
+
+  // Deduplicate near-identical events per player/tick and keep the stronger one.
+  const blindByKey = new Map();
+  for (const ev of roundFlashBlindEvents) {
+    const sid = String(ev.victim_steamid || '');
+    const tk = Number(ev.tick) || 0;
+    if (!sid) continue;
+    const bucket = Math.round(tk / 6);
+    const key = `${sid}:${bucket}`;
+    const score = (Number(ev.intensity) || 0.6) * (Number(ev.duration_ticks) || FLASH_PLAYER_ICON_TICKS);
+    const prev = blindByKey.get(key);
+    if (!prev || score > prev._score) {
+      blindByKey.set(key, { ...ev, _score: score });
+    }
+  }
+  roundFlashBlindEvents = Array.from(blindByKey.values())
+    .map(({ _score, ...rest }) => rest)
+    .sort((a, b) => Number(a.tick || 0) - Number(b.tick || 0));
   }
 
   // Slider
@@ -1904,6 +2095,53 @@ function didCrossTick(targetTick, fromTick, toTick) {
 function clamp01(v) {
   if (!Number.isFinite(v)) return 0;
   return Math.max(0, Math.min(1, v));
+}
+
+function getFlashFacingFactor(playerRow, flashX, flashY) {
+  const px = Number(playerRow?.X);
+  const py = Number(playerRow?.Y);
+  const yaw = Number(playerRow?.yaw);
+  if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(yaw)) return 1;
+
+  const dx = Number(flashX) - px;
+  const dy = Number(flashY) - py;
+  const dist = Math.hypot(dx, dy);
+  if (!Number.isFinite(dist) || dist < 0.001) return 1;
+
+  const yawRad = (yaw * Math.PI) / 180;
+  const fx = Math.cos(yawRad);
+  const fy = Math.sin(yawRad);
+  const ux = dx / dist;
+  const uy = dy / dist;
+  const dot = fx * ux + fy * uy;
+  const front = clamp01((dot + 1) * 0.5);
+
+  return FLASH_BACKFACE_FLOOR + (1 - FLASH_BACKFACE_FLOOR) * Math.pow(front, FLASH_BACKFACE_EXP);
+}
+
+function traceTeardropPath(cx, cy, fwdX, fwdY, tipLen, baseHalf, wing, rearLen) {
+  const perpX = -fwdY;
+  const perpY = fwdX;
+
+  const bodyR = Math.max(3, Math.max(baseHalf, rearLen * 0.9));
+  const bodyCx = cx - fwdX * (tipLen * 0.16);
+  const bodyCy = cy - fwdY * (tipLen * 0.16);
+
+  const tipX = bodyCx + fwdX * (bodyR + tipLen * 0.58);
+  const tipY = bodyCy + fwdY * (bodyR + tipLen * 0.58);
+  const baseCenterX = bodyCx + fwdX * (bodyR * 0.86);
+  const baseCenterY = bodyCy + fwdY * (bodyR * 0.86);
+  const tipBaseHalf = Math.max(1.2, bodyR * 0.34);
+  const leftBX = baseCenterX + perpX * tipBaseHalf;
+  const leftBY = baseCenterY + perpY * tipBaseHalf;
+  const rightBX = baseCenterX - perpX * tipBaseHalf;
+  const rightBY = baseCenterY - perpY * tipBaseHalf;
+
+  // Round body + small triangle tip.
+  ctx.arc(bodyCx, bodyCy, bodyR, 0, Math.PI * 2);
+  ctx.moveTo(leftBX, leftBY);
+  ctx.lineTo(tipX, tipY);
+  ctx.lineTo(rightBX, rightBY);
 }
 
 function nearestTick(sortedTicks, targetTick) {
@@ -2315,8 +2553,16 @@ function renderFrame() {
 
   // Grenade landing markers
   for (const gl of grenadeLandings) {
-    if (gl.land_X == null || gl.land_Y == null) continue;
-    const [gx, gy] = worldToCanvas(gl.land_X, gl.land_Y);
+    let landX = gl.land_X;
+    let landY = gl.land_Y;
+    if (landX == null || landY == null) {
+      const [rx, ry] = resolveLandingXY(gl);
+      landX = rx;
+      landY = ry;
+    }
+    if (landX == null || landY == null) continue;
+
+    const [gx, gy] = worldToCanvas(landX, landY);
     const gtype = normalizeGrenadeType(gl.grenade_type || 'grenade');
     const rawTick = Number(gl.land_tick || currentTick);
     const markerTick = gtype === 'hegrenade' ? (rawTick - roundHELandingDelayComp) : rawTick;
@@ -2411,33 +2657,64 @@ function renderFrame() {
     ctx.restore();
   }
 
-  // Bomb
-  if (bombState) {
-    const bInRound = bombEvents;
-    const lastBomb = bInRound.length ? bInRound[bInRound.length - 1] : null;
-    const bombEvent = String(lastBomb?.event || '').toLowerCase();
-    const shouldDrawBombMarker = bombEvent === 'plant' || bombEvent === 'defuse' || bombEvent === 'detonate' || bombEvent === 'explode';
-    if (lastBomb && shouldDrawBombMarker && lastBomb.X != null && lastBomb.Y != null) {
-      const [bx, by] = worldToCanvas(lastBomb.X, lastBomb.Y);
-      const pulse = 0.3 + 0.2 * Math.sin(Date.now() / 300);
-      ctx.beginPath();
-      ctx.arc(bx, by, 10 + pulse * 4, 0, Math.PI*2);
-      ctx.fillStyle = `rgba(245,166,35,${0.15 + pulse * 0.2})`;
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(bx, by, 7, 0, Math.PI*2);
-      ctx.fillStyle = '#f5a623';
-      ctx.fill();
-      ctx.fillStyle = '#000';
-      ctx.font = 'bold 8px Inter';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      const bombChar = lastBomb.event === 'plant' ? 'P' :
-                       lastBomb.event === 'defuse' ? 'D' :
-               (lastBomb.event === 'explode' || lastBomb.event === 'detonate') ? 'X' : 'C';
-      ctx.fillText(bombChar, bx, by);
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'alphabetic';
+  // Bomb marker with robust fallback position (event -> last event with coords -> moving carrier path).
+  {
+    const hasBombContext = bombEvents.length > 0 || bombCarrierPath.length > 0;
+    if (hasBombContext) {
+      const lastBomb = bombEvents.length ? bombEvents[bombEvents.length - 1] : null;
+      const lastBombWithPos = [...bombEvents].reverse().find(b => b?.X != null && b?.Y != null) || null;
+      const hasCarrierPos = bombCarrierPath.length > 0;
+      const carrierLast = hasCarrierPos ? bombCarrierPath[bombCarrierPath.length - 1] : null;
+      const bombOwnerSid = (lastBomb?.steamid != null) ? String(lastBomb.steamid) : null;
+      const ownerRow = bombOwnerSid ? (playerSnap[bombOwnerSid] || playerSnapNext[bombOwnerSid]) : null;
+
+      let bxWorld = null;
+      let byWorld = null;
+
+      if (lastBomb && lastBomb.X != null && lastBomb.Y != null) {
+        bxWorld = lastBomb.X;
+        byWorld = lastBomb.Y;
+      } else if (lastBombWithPos) {
+        bxWorld = lastBombWithPos.X;
+        byWorld = lastBombWithPos.Y;
+      } else if (ownerRow && ownerRow.X != null && ownerRow.Y != null) {
+        bxWorld = ownerRow.X;
+        byWorld = ownerRow.Y;
+      } else if (carrierLast && carrierLast.X != null && carrierLast.Y != null) {
+        bxWorld = carrierLast.X;
+        byWorld = carrierLast.Y;
+      }
+
+      if (bxWorld != null && byWorld != null) {
+        const [bx, by] = worldToCanvas(bxWorld, byWorld);
+        const bombEvent = String(lastBomb?.event || '').toLowerCase();
+        const plantedState = bombEvent === 'plant' || bombEvent === 'defuse' || bombEvent === 'detonate' || bombEvent === 'explode';
+        const pulse = 0.26 + 0.18 * Math.sin(Date.now() / 300);
+        const outerR = plantedState ? (10 + pulse * 4) : (8 + pulse * 2.4);
+        const innerR = plantedState ? 7 : 5.6;
+
+        ctx.beginPath();
+        ctx.arc(bx, by, outerR, 0, Math.PI * 2);
+        ctx.fillStyle = plantedState ? `rgba(245,166,35,${0.15 + pulse * 0.2})` : `rgba(245,166,35,${0.08 + pulse * 0.12})`;
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(bx, by, innerR, 0, Math.PI * 2);
+        ctx.fillStyle = '#f5a623';
+        ctx.fill();
+
+        ctx.fillStyle = '#000';
+        ctx.font = 'bold 8px Inter';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const bombChar = bombEvent === 'plant' ? 'P' :
+                         bombEvent === 'defuse' ? 'D' :
+                         (bombEvent === 'explode' || bombEvent === 'detonate') ? 'X' :
+                         (hasCarrierPos ? 'C' : 'B');
+        ctx.fillText(bombChar, bx, by);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+      }
     }
   }
 
@@ -2484,6 +2761,10 @@ function renderFrame() {
     const iy = y1 != null && y2 != null ? (y1 + (y2 - y1) * renderInterp) : p.Y;
 
     const [px, py] = worldToCanvas(ix, iy);
+    const yawNum = Number(p.yaw);
+    const yawRad = Number.isFinite(yawNum) ? (yawNum * Math.PI) / 180 : -Math.PI / 2;
+    const fwdX = Math.cos(yawRad);
+    const fwdY = -Math.sin(yawRad);
 
     ctx.save();
     ctx.globalAlpha = isAlive ? 1 : 0.25;
@@ -2492,14 +2773,59 @@ function renderFrame() {
     ctx.shadowColor = clr;
     ctx.shadowBlur  = isAlive ? 8 : 0;
 
-    // Circle fill
+    // Main marker: raindrop body with an inner FOV droplet.
     ctx.beginPath();
-    ctx.arc(px, py, 11, 0, Math.PI*2);
+    traceTeardropPath(
+      px,
+      py,
+      fwdX,
+      fwdY,
+      PLAYER_DROPLET_TIP_LEN,
+      PLAYER_DROPLET_BASE,
+      PLAYER_DROPLET_WING,
+      PLAYER_DROPLET_REAR,
+    );
+    ctx.closePath();
     ctx.fillStyle = isAlive ? clr : '#444';
     ctx.fill();
     ctx.strokeStyle = isAlive ? '#fff' : '#666';
     ctx.lineWidth = 1.5;
     ctx.stroke();
+
+    if (isAlive) {
+      ctx.beginPath();
+      traceTeardropPath(
+        px,
+        py,
+        fwdX,
+        fwdY,
+        PLAYER_FOV_INNER_TIP_LEN,
+        PLAYER_FOV_INNER_BASE,
+        PLAYER_FOV_INNER_WING,
+        PLAYER_FOV_INNER_REAR,
+      );
+      ctx.closePath();
+
+      if (isCT === true) {
+        ctx.fillStyle = 'rgba(220,238,255,0.45)';
+      } else if (isCT === false) {
+        ctx.fillStyle = 'rgba(255,224,206,0.45)';
+      } else {
+        ctx.fillStyle = 'rgba(235,235,235,0.4)';
+      }
+      ctx.fill();
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.56)';
+      ctx.lineWidth = 0.9;
+      ctx.stroke();
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.58)';
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ctx.moveTo(px - fwdX * 1.8, py - fwdY * 1.8);
+      ctx.lineTo(px + fwdX * (PLAYER_FOV_INNER_TIP_LEN - 0.8), py + fwdY * (PLAYER_FOV_INNER_TIP_LEN - 0.8));
+      ctx.stroke();
+    }
 
     ctx.shadowBlur = 0;
 
@@ -2515,19 +2841,6 @@ function renderFrame() {
       const hpClr  = hp > 50 ? '#4caf50' : hp > 25 ? '#ff9800' : '#f44336';
       ctx.fillStyle = hpClr;
       ctx.fillRect(barX, barY, barW * hpFrac, barH);
-    }
-
-    // Direction indicator (yaw)
-    if (isAlive && p.yaw != null) {
-      const yawRad = (p.yaw * Math.PI) / 180;
-      const dirX = px + Math.cos(yawRad) * 14;
-      const dirY = py - Math.sin(yawRad) * 14;
-      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(px, py);
-      ctx.lineTo(dirX, dirY);
-      ctx.stroke();
     }
 
     // Name label
